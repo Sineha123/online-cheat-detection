@@ -1192,6 +1192,35 @@ def _persist_object_violation(student_id, student_name, label, confidence):
         cooldown_seconds=float(OBJECT_VIOLATION_COOLDOWN_SEC)
     )
 
+
+def _reset_exam_runtime_state(student_id, student_name=None):
+    sid = str(student_id)
+
+    try:
+        if warning_system:
+            warning_system.initialize_student(sid, student_name or warning_system.student_names.get(sid, f"Student {sid}"))
+    except Exception as e:
+        logger.warning(f"Warning system reset failed for student {sid}: {e}")
+
+    try:
+        if tab_detector:
+            tab_detector.initialize_student(sid)
+    except Exception as e:
+        logger.warning(f"Tab detector reset failed for student {sid}: {e}")
+
+    try:
+        face_analyzer, person_detector, decision_engine, UILayer = _get_vision_engines()
+        if hasattr(decision_engine, 'reset_student'):
+            decision_engine.reset_student(sid)
+    except Exception as e:
+        logger.warning(f"Decision engine reset failed for student {sid}: {e}")
+
+    with latest_student_frames_lock:
+        latest_student_frames.pop(sid, None)
+
+    with student_detection_state_lock:
+        student_detection_state.pop(sid, None)
+
 OCR_KEYWORD_MAP = {
     'iphone': 'cell phone',
     'android': 'cell phone',
@@ -1518,7 +1547,7 @@ def _run_student_frame_detection(student_id, student_name, frame):
             sid, face_detected, person_count, yaw_angle, ear, iris_offset, banned_objects
         )
         
-        # 4. Integrate with Legacy DB persistence (ONLY face detection active)
+        # 4. Integrate detections with warning persistence
         for w in warnings:
             if "Face not detected" in w:
                 _persist_behavior_violation(sid, student_name, "NO_FACE", "No face detected in camera viewport")
@@ -1532,9 +1561,10 @@ def _run_student_frame_detection(student_id, student_name, frame):
             # elif "Gazing" in w:
             #     _persist_behavior_violation(sid, student_name, "DISTRACTION", "Gazing at another screen/paper")
 
-        # Object violations disabled per user request
-        # for obj in banned_objects:
-        #     _persist_object_violation(sid, student_name, obj['label'], float(obj['bbox'][4]))
+        for obj in banned_objects:
+            bbox = obj.get('bbox') or (0, 0, 0, 0, 0.0)
+            confidence = float(bbox[4]) if len(bbox) >= 5 else 0.0
+            _persist_object_violation(sid, student_name, obj.get('label', 'Object'), confidence)
 
         # 5. Draw the unified HUD before encoding
         UILayer.draw_overlays(processed, warnings, penalty_score, bboxes, banned_objects, 0.0)
@@ -2275,10 +2305,7 @@ def examSessionStart():
             if not already_active:
                 active_exam_students.add(student_id)
 
-        if warning_system:
-            warning_system.initialize_student(student_id, student_name)
-        if tab_detector:
-            tab_detector.initialize_student(student_id)
+        _reset_exam_runtime_state(student_id, student_name)
         if admin_monitor:
             admin_monitor.start_monitoring(student_id, student_name)
 
@@ -3957,4 +3984,3 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Fatal error launching app: {e}")
         traceback.print_exc()
-

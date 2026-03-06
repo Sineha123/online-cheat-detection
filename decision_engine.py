@@ -17,6 +17,14 @@ class DecisionEngine:
                 }
             return self.student_states[sid]
 
+    def reset_student(self, sid):
+        with self._lock:
+            self.student_states[str(sid)] = {
+                "warning_count": 0,
+                "last_warning_time": 0.0,
+                "condition_start": {}
+            }
+
     def _check_condition(self, state, condition_name, is_active, required_time, current_time):
         if is_active:
             if condition_name not in state["condition_start"]:
@@ -31,7 +39,6 @@ class DecisionEngine:
     def evaluate(self, sid, face_detected, person_count, yaw_angle, ear, iris_offset_ratio, banned_objects):
         """
         Evaluates signals and returns active UI alerts and the total penalty score.
-        Simplified: ONLY checks for 'Face not detected'
         """
         active_alerts = []
         state = self.get_state(sid)
@@ -40,6 +47,12 @@ class DecisionEngine:
         # Rule 1 - No Face (ONLY Rule Active)
         if self._check_condition(state, "no_face", not face_detected, config.TIME_NO_FACE, current_time):
             active_alerts.append("Face not detected")
+
+        # Rule 2 - Prohibited object detection
+        has_banned_object = bool(banned_objects)
+        if self._check_condition(state, "banned_object", has_banned_object, config.TIME_BANNED_OBJECT, current_time):
+            labels = ", ".join(sorted({str(obj.get("label", "Object")) for obj in banned_objects})) or "Object"
+            active_alerts.append(f"Prohibited object detected: {labels}")
             
         # --- Rule Aggregation and Scoring Logic ---
         num_alerts = len(active_alerts)
@@ -56,4 +69,3 @@ class DecisionEngine:
                     state["last_warning_time"] = current_time
                     
             return active_alerts, state["warning_count"]
-
