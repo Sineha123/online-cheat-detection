@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href='https://unpkg.com/boxicons@2.0.9/css/boxicons.min.css' rel='stylesheet'>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css">
+    <title>Result Details - CheatBuster Admin</title>
+    <style>
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --success-gradient: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            --danger-gradient: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            --light: #ffffff;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-700: #374151;
+            --gray-900: #111827;
+            --shadow-sm: 0 1px 2px 0 rgba(0,0,0,0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--gray-50); color: var(--gray-900); }
+
+        #sidebar {
+            position: fixed; top: 0; left: 0; width: 280px; height: 100%;
+            background: var(--light); z-index: 2000;
+            transition: all 0.3s ease; box-shadow: var(--shadow-lg);
+            border-right: 1px solid var(--gray-200);
+        }
+        #sidebar.hide { width: 80px; }
+        #sidebar.hide .text { display: none; }
+        #sidebar .brand {
+            display: flex; align-items: center; gap: 15px; padding: 25px;
+            background: var(--primary-gradient); color: white; text-decoration: none;
+            font-size: 20px; font-weight: 700;
+        }
+        #sidebar .brand i { font-size: 32px; min-width: 32px; }
+        #sidebar .side-menu { padding: 20px 0; list-style: none; }
+        #sidebar .side-menu li { margin: 8px 15px; }
+        #sidebar .side-menu li a {
+            display: flex; align-items: center; gap: 15px; padding: 14px 20px;
+            border-radius: 12px; color: var(--gray-700); text-decoration: none;
+            font-weight: 500; transition: all 0.3s ease;
+        }
+        #sidebar .side-menu li a:hover { background: var(--gray-100); transform: translateX(5px); }
+        #sidebar .side-menu li.active a { background: var(--primary-gradient); color: white; box-shadow: var(--shadow-md); }
+        #sidebar .side-menu li a i { font-size: 24px; min-width: 24px; }
+
+        #content { position: relative; width: calc(100% - 280px); left: 280px; transition: all 0.3s ease; }
+        #content.expand { width: calc(100% - 80px); left: 80px; }
+
+        nav {
+            height: 70px; background: var(--light); padding: 0 30px;
+            display: flex; align-items: center; justify-content: space-between;
+            box-shadow: var(--shadow-sm); position: sticky; top: 0; z-index: 1000;
+        }
+        nav .bx-menu { font-size: 28px; cursor: pointer; color: var(--gray-700); }
+        nav .nav-title {
+            font-size: 22px; font-weight: 700;
+            background: var(--primary-gradient);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+
+        main { padding: 30px; min-height: calc(100vh - 70px); }
+        .head-title h1 { font-size: 30px; font-weight: 800; color: var(--gray-900); margin-bottom: 5px; }
+        .breadcrumb { display: flex; align-items: center; gap: 8px; list-style: none; padding: 0; font-size: 14px; margin-bottom: 30px; }
+        .breadcrumb li a { color: var(--gray-700); text-decoration: none; }
+        .breadcrumb li.active a { color: #667eea; font-weight: 600; }
+
+        .profile-card {
+            background: var(--light); border-radius: 20px; padding: 35px;
+            box-shadow: var(--shadow-md); border: 1px solid var(--gray-200);
+            display: flex; align-items: center; gap: 30px; margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        .profile-card img {
+            width: 110px; height: 110px; border-radius: 50%; object-fit: cover;
+            border: 4px solid #667eea; box-shadow: var(--shadow-md); flex-shrink: 0;
+        }
+        .profile-card .info h2 { font-size: 26px; font-weight: 800; color: var(--gray-900); margin-bottom: 6px; }
+        .profile-card .info p { font-size: 15px; color: var(--gray-700); margin-bottom: 4px; }
+
+        .stats-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 20px; margin-bottom: 30px;
+        }
+        .stat-card {
+            background: var(--light); border-radius: 16px; padding: 24px;
+            box-shadow: var(--shadow-md); border: 1px solid var(--gray-200);
+            text-align: center; transition: all 0.3s;
+        }
+        .stat-card:hover { transform: translateY(-5px); box-shadow: var(--shadow-lg); }
+        .stat-card .stat-icon { font-size: 36px; margin-bottom: 10px; }
+        .stat-card .stat-value { font-size: 26px; font-weight: 800; color: var(--gray-900); }
+        .stat-card .stat-label { font-size: 12px; color: var(--gray-700); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+        .perf-card {
+            background: var(--light); border-radius: 20px; padding: 28px;
+            box-shadow: var(--shadow-md); border: 1px solid var(--gray-200); margin-bottom: 30px;
+        }
+        .perf-card h4 { font-size: 18px; font-weight: 700; margin-bottom: 18px; color: var(--gray-900); }
+        .perf-bar { height: 14px; background: var(--gray-100); border-radius: 10px; overflow: hidden; }
+        .perf-fill { height: 100%; border-radius: 10px; background: var(--primary-gradient); transition: width 1.5s ease; }
+        .perf-labels { display: flex; justify-content: space-between; font-size: 13px; color: var(--gray-700); margin-top: 8px; }
+
+        .violations-card {
+            background: var(--light); border-radius: 20px; padding: 28px;
+            box-shadow: var(--shadow-md); border: 1px solid var(--gray-200);
+        }
+        .violations-card h4 { font-size: 18px; font-weight: 700; margin-bottom: 20px; color: var(--gray-900); }
+
+        table { width: 100%; border-collapse: collapse; }
+        table thead tr { background: var(--primary-gradient); color: white; }
+        table thead th { padding: 14px 16px; text-align: left; font-weight: 600; font-size: 13px; text-transform: uppercase; }
+        table tbody td { padding: 16px; border-bottom: 1px solid var(--gray-200); font-size: 14px; }
+        table tbody tr:hover { background: var(--gray-50); }
+
+        .badge-pass { background: linear-gradient(135deg,#11998e,#38ef7d); color:white; padding:6px 18px; border-radius:50px; font-weight:600; font-size:13px; display:inline-flex; align-items:center; gap:5px; }
+        .badge-fail { background: linear-gradient(135deg,#eb3349,#f45c43); color:white; padding:6px 18px; border-radius:50px; font-weight:600; font-size:13px; display:inline-flex; align-items:center; gap:5px; }
+        .badge-terminated { background: linear-gradient(135deg,#f093fb,#f5576c); color:white; padding:6px 18px; border-radius:50px; font-weight:600; font-size:13px; display:inline-flex; align-items:center; gap:5px; }
+
+        .btn-back {
+            display: inline-flex; align-items: center; gap: 8px;
+            background: var(--primary-gradient); color: white; border: none;
+            padding: 10px 22px; border-radius: 50px; font-weight: 600;
+            text-decoration: none; transition: all 0.3s; box-shadow: var(--shadow-md);
+        }
+        .btn-back:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); color: white; text-decoration: none; }
+
+        @media screen and (max-width: 768px) {
+            #sidebar { width: 80px; }
+            #sidebar .text { display: none; }
+            #content { width: calc(100% - 80px); left: 80px; }
+            .profile-card { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+
+    <section id="sidebar">
+        <a href="#" class="brand">
+            <i class='bx bxs-graduation'></i>
+            <span class="text">CheatBuster</span>
+        </a>
+        <ul class="side-menu top">
+            <li>
+                <a href="{{ url_for('adminStudents') }}">
+                    <i class='bx bxs-group'></i>
+                    <span class="text">Students</span>
+                </a>
+            </li>
+            <li class="active">
+                <a href="{{ url_for('adminResults') }}">
+                    <i class='bx bxs-trophy'></i>
+                    <span class="text">Results</span>
+                </a>
+            </li>
+            <li>
+                <a href="{{ url_for('adminLiveMonitoring') }}">
+                    <i class='bx bxs-camera'></i>
+                    <span class="text">Live Monitor</span>
+                </a>
+            </li>
+        </ul>
+        <ul class="side-menu">
+            <li>
+                <a href="{{ url_for('logout') }}" class="logout">
+                    <i class='bx bxs-log-out-circle'></i>
+                    <span class="text">Logout</span>
+                </a>
+            </li>
+        </ul>
+    </section>
+
+    <section id="content">
+        <nav>
+            <i class='bx bx-menu' id="menu-btn"></i>
+            <span class="nav-title">Result Details</span>
+            <a href="{{ url_for('adminResults') }}" class="btn-back">
+                <i class='bx bx-arrow-back'></i> Back to Results
+            </a>
+        </nav>
+
+        <main>
+            <div class="head-title">
+                <h1>Result Details</h1>
+                <ul class="breadcrumb">
+                    <li><a href="{{ url_for('adminResults') }}">Results</a></li>
+                    <li><i class='bx bx-chevron-right'></i></li>
+                    <li class="active"><a href="#">{{ result.student_name }}</a></li>
+                </ul>
+            </div>
+
+            <!-- Profile Card -->
+            <div class="profile-card">
+                {% if result.student_profile %}
+                <img src="{{ url_for('static', filename='Profiles/' + result.student_profile) }}"
+                     alt="{{ result.student_name }}"
+                     onerror="this.src='https://ui-avatars.com/api/?name={{ result.student_name|urlencode }}&background=667eea&color=fff&size=110'">
+                {% else %}
+                <img src="https://ui-avatars.com/api/?name={{ result.student_name|urlencode }}&background=667eea&color=fff&size=110"
+                     alt="{{ result.student_name }}">
+                {% endif %}
+                <div class="info">
+                    <h2>{{ result.student_name }}</h2>
+                    <p><i class='bx bx-envelope'></i> {{ result.student_email or 'N/A' }}</p>
+                    <p><i class='bx bx-id-card'></i> Student ID: {{ result.student_id }}</p>
+                    <p><i class='bx bx-book'></i> Exam: {{ result.exam_title or 'Final Examination' }}</p>
+                    <p><i class='bx bx-time'></i> Submitted:
+                        {% if result.submission_time %}
+                            {{ result.submission_time.strftime('%d %B %Y at %H:%M') }}
+                        {% else %}N/A{% endif %}
+                    </p>
+                    <div style="margin-top:12px;">
+                        {% if result.auto_terminated %}
+                            <span class="badge-terminated"><i class='bx bxs-x-circle'></i> Exam Terminated</span>
+                        {% elif result.percentage >= 50 %}
+                            <span class="badge-pass"><i class='bx bxs-check-circle'></i> Passed</span>
+                        {% else %}
+                            <span class="badge-fail"><i class='bx bxs-x-circle'></i> Failed</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon">📊</div>
+                    <div class="stat-value">{{ result.percentage }}%</div>
+                    <div class="stat-label">Score %</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🎯</div>
+                    <div class="stat-value">{{ result.score }}/{{ (result.total_questions or 125) * 2 }}</div>
+                    <div class="stat-label">Points</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🏆</div>
+                    <div class="stat-value" style="color:{% if result.grade == 'A' %}#10b981{% elif result.grade == 'B' %}#3b82f6{% elif result.grade == 'C' %}#f59e0b{% else %}#ef4444{% endif %};">
+                        {{ result.grade }}
+                    </div>
+                    <div class="stat-label">Grade</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⏱️</div>
+                    <div class="stat-value">
+                        {% if result.time_spent %}
+                            {{ result.time_spent // 60 }}m {{ result.time_spent % 60 }}s
+                        {% else %}N/A{% endif %}
+                    </div>
+                    <div class="stat-label">Time Spent</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⚠️</div>
+                    {% set warn_display = result.warnings_issued if result.warnings_issued < 3 else 3 %}
+                    <div class="stat-value" style="color:{% if warn_display >= 3 %}#ef4444{% elif warn_display >= 1 %}#f59e0b{% else %}#10b981{% endif %};">
+                        {{ warn_display }}/3
+                    </div>
+                    <div class="stat-label">Warnings</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📝</div>
+                    <div class="stat-value">{{ result.total_questions or 125 }}</div>
+                    <div class="stat-label">Questions</div>
+                </div>
+            </div>
+
+            <!-- Performance Bar -->
+            <div class="perf-card">
+                <h4><i class='bx bxs-bar-chart-alt-2'></i> Performance Overview</h4>
+                <div class="perf-bar">
+                    <div class="perf-fill" id="perfFill" style="width: {{ result.percentage }}%;
+                        background: {% if result.percentage >= 50 %}linear-gradient(90deg,#11998e,#38ef7d){% else %}linear-gradient(90deg,#eb3349,#f45c43){% endif %};"></div>
+                </div>
+                <div class="perf-labels">
+                    <span>0%</span>
+                    <span style="color:{% if result.percentage >= 50 %}#10b981{% else %}#ef4444{% endif %}; font-weight:700;">
+                        {{ result.percentage }}% — {{ result.grade }} Grade
+                    </span>
+                    <span>100%</span>
+                </div>
+                {% if result.auto_terminated %}
+                <div style="background:#fff3e0;border-radius:10px;padding:15px;margin-top:20px;border-left:4px solid #f59e0b;">
+                    <strong style="color:#ef6c00;">⚠️ Exam Terminated:</strong>
+                    <span style="color:#666;margin-left:5px;">This student's exam was automatically terminated due to reaching the maximum number of violations (3/3).</span>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Violations Table -->
+            <div class="violations-card">
+                <h4><i class='bx bxs-error-circle' style="color:#ef4444;margin-right:8px;"></i>
+                    Violation Records
+                    {% if violations %}
+                    <span style="font-size:14px;font-weight:400;color:#888;margin-left:8px;">({{ violations|length }} total)</span>
+                    {% endif %}
+                </h4>
+                {% if violations %}
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Violation Type</th>
+                                <th>Time Detected</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for v in violations %}
+                            <tr>
+                                <td><strong>{{ loop.index }}</strong></td>
+                                <td>
+                                    <span style="text-transform:capitalize;font-weight:600;color:#ef4444;">
+                                        {{ (v.type or 'Unknown') | replace('_', ' ') }}
+                                    </span>
+                                </td>
+                                <td><small style="color:#888;">{{ v.time or 'N/A' }}</small></td>
+                                <td style="color:#555;">{{ v.details or '—' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div style="text-align:center;padding:50px;color:#aaa;">
+                    <i class='bx bxs-shield-check' style="font-size:64px;color:#d1d5db;margin-bottom:15px;display:block;"></i>
+                    <h5 style="color:#6b7280;margin-bottom:8px;">No Violations Recorded</h5>
+                    <p style="font-size:14px;">This student completed the exam without any recorded violations.</p>
+                </div>
+                {% endif %}
+            </div>
+        </main>
+    </section>
+
+    <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.getElementById('menu-btn').addEventListener('click', function() {
+            document.getElementById('sidebar').classList.toggle('hide');
+            document.getElementById('content').classList.toggle('expand');
+        });
+
+        // Animate performance bar
+        document.addEventListener('DOMContentLoaded', function() {
+            const fill = document.getElementById('perfFill');
+            if (fill) {
+                const targetWidth = fill.style.width;
+                fill.style.width = '0';
+                setTimeout(() => { fill.style.width = targetWidth; }, 400);
+            }
+        });
+    </script>
+</body>
+</html>

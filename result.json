@@ -1,0 +1,207 @@
+[
+    {
+        "Id": 1,
+        "Name": "Test Student",
+        "TotalMark": 33,
+        "TrustScore": 100.0,
+        "Status": "Fail",
+        "Date": "2025-11-08",
+        "StId": 2,
+        "Link": "Test Student_001Profile.jpg"
+    },
+    {
+        "Id": 2,
+        "Name": "Test Student",
+        "TotalMark": 13,
+        "TrustScore": 88,
+        "Status": "Fail",
+        "Date": "2025-11-08",
+        "StId": 2,
+        "Link": "Test Student_002Profile.jpg"
+    },
+    {
+        "Id": 3,
+        "Name": "Test Student",
+        "TotalMark": 13,
+        "TrustScore": 0,
+        "Status": "Fail(Cheating)",
+        "Date": "2025-11-10",
+        "StId": 2,
+        "Link": "Test Student_003Profile.jpg"
+    },
+    {
+        "Id": 4,
+        "Name": "Test Student",
+        "TotalMark": 13,
+        "TrustScore": 100,
+        "Status": "Fail",
+        "Date": "2025-11-10",
+        "StId": 2,
+        "Link": "Test Student_003Profile.jpg"
+    },
+    {
+        "Id": 5,
+        "Name": "Test Student",
+        "TotalMark": 13,
+        "TrustScore": 100,
+        "Status": "Fail",
+        "Date": "2025-11-10",
+        "StId": 2,
+        "Link": "Test Student_003Profile.jpg"
+    },
+    {
+        "Id": 6,
+        "Name": "Test Student",
+        "TotalMark": 13,
+        "TrustScore": 100,
+        "Status": "Fail",
+        "Date": "2025-11-10",
+        "StId": 2,
+        "Link": "Test Student_003Profile.jpg"
+    },
+    {
+        "Id": 7,
+        "Name": "Test Student",
+        "TotalMark": 13,
+        "TrustScore": 100,
+        "Status": "Fail",
+        "Date": "2025-11-10",
+        "StId": 2,
+        "Link": "Test Student_003Profile.jpg"
+    },
+    {
+        "Id": 8,
+        "Name": "Admin",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-10",
+        "StId": 1,
+        "Link": "Admin_008Profile.jpg",
+        "TerminationReason": "Maximum warnings reached"
+    },
+    {
+        "Id": 9,
+        "Name": "Admin",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-10",
+        "StId": 1,
+        "Link": "Admin_008Profile.jpg"
+    },
+    {
+        "Id": 10,
+        "Name": "Test Student",
+        "TotalMark": 60,
+        "TrustScore": 62,
+        "Status": "Fail(Cheating)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_010Profile.jpg"
+    },
+    {
+        "Id": 11,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_011Profile.jpg",
+        "TerminationReason": "Maximum warnings reached"
+    },
+    {
+        "Id": 12,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_011Profile.jpg"
+    },
+    {
+        "Id": 13,
+        "Name": "Test Student",
+        "TotalMark": 13,
+        "TrustScore": 100,
+        "Status": "Fail",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_013Profile.jpg"
+    },
+    {
+        "Id": 14,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_014Profile.jpg"
+    },
+    {
+        "Id": 15,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_015Profile.jpg",
+        "TerminationReason": "Maximum warnings reached"
+    },
+    {
+        "Id": 16,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_015Profile.jpg"
+    },
+    {
+        "Id": 17,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_017Profile.jpg",
+        "TerminationReason": "Maximum warnings reached"
+    },
+    {
+        "Id": 18,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-11",
+        "StId": 2,
+        "Link": "Test Student_017Profile.jpg"
+    },
+    {
+        "Id": 19,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-16",
+        "StId": 2,
+        "Link": "Test Student_019Profile.jpg",
+        "TerminationReason": "Maximum warnings reached"
+    },
+    {
+        "Id": 20,
+        "Name": "Test Student",
+        "TotalMark": 0,
+        "TrustScore": 0,
+        "Status": "Fail(Terminated)",
+        "Date": "2025-11-16",
+        "StId": 2,
+        "Link": "Test Student_019Profile.jpg"
+    }
+]
