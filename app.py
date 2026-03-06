@@ -459,10 +459,13 @@ YOLO_CONF_THRESHOLD = float(os.getenv('YOLO_CONF_THRESHOLD', '0.22'))
 YOLO_IMG_SIZE = int(os.getenv('YOLO_IMG_SIZE', '640'))
 OBJECT_VIOLATION_COOLDOWN_SEC = float(os.getenv('OBJECT_VIOLATION_COOLDOWN_SEC', '3.5'))
 DNN_OBJECT_FALLBACK_ENABLED = (os.getenv('DNN_OBJECT_FALLBACK_ENABLED', '1') == '1')
+OCR_OBJECT_FALLBACK_ENABLED = (os.getenv('OCR_OBJECT_FALLBACK_ENABLED', '0') == '1')
+PHONE_CONTOUR_FALLBACK_ENABLED = (os.getenv('PHONE_CONTOUR_FALLBACK_ENABLED', '0') == '1')
 
 # Objects that are prohibited during exam
 PROHIBITED_LABELS = {
     'cell phone', 'mobile phone', 'phone', 'smartphone',
+    'camera', 'webcam',
     'laptop', 'tablet', 'ipad',
     'book', 'notebook',
     'headphones', 'earphones', 'headset', 'earbuds', 'airpods'
@@ -473,22 +476,30 @@ def _normalize_label(label):
     aliases = {
         'cellphone': 'cell phone',
         'phone': 'cell phone',
-        'mobile': 'mobile phone',
+        'mobile': 'cell phone',
+        'mobile phone': 'cell phone',
+        'smartphone': 'cell phone',
         'notebook': 'book',
         'earphone': 'earphones',
         'earbud': 'earbuds',
         'headphone': 'headphones',
-        'airpod': 'airpods'
+        'airpod': 'airpods',
+        'web cam': 'webcam',
+        'books': 'book',
+        'camera phone': 'cell phone'
     }
     return aliases.get(value, value)
 
 def _label_is_prohibited(label):
-    """Flexible matching so custom model labels like 'wireless headphones' are also caught."""
+    """Strict selective matching for exam-prohibited objects only."""
     norm = _normalize_label(label)
     if norm in PROHIBITED_LABELS:
         return True
+
+    normalized_tokens = set(re.findall(r'[a-z0-9]+', norm))
     for bad in PROHIBITED_LABELS:
-        if bad in norm or norm in bad:
+        bad_tokens = set(re.findall(r'[a-z0-9]+', bad))
+        if bad_tokens and bad_tokens.issubset(normalized_tokens):
             return True
     return False
 
@@ -569,12 +580,8 @@ if ULTRALYTICS_AVAILABLE:
         # so detection works even if label name matching missed something.
         COCO_PROHIBITED_IDS = [
             63,  # laptop
-            64,  # mouse (computer)
             67,  # cell phone
             73,  # book
-            72,  # tv (screen cheating)
-            76,  # scissors
-            77,  # teddy bear (to avoid impersonation)
         ]
         for cid in COCO_PROHIBITED_IDS:
             if cid in yolo_class_names and cid not in prohibited_class_ids:
@@ -1198,7 +1205,9 @@ def _reset_exam_runtime_state(student_id, student_name=None):
 
     try:
         if warning_system:
-            warning_system.initialize_student(sid, student_name or warning_system.student_names.get(sid, f"Student {sid}"))
+            resolved_name = student_name or warning_system.student_names.get(sid, f"Student {sid}")
+            warning_system.initialize_student(sid, resolved_name)
+            warning_system.reset_student(sid)
     except Exception as e:
         logger.warning(f"Warning system reset failed for student {sid}: {e}")
 
@@ -1207,6 +1216,9 @@ def _reset_exam_runtime_state(student_id, student_name=None):
             tab_detector.initialize_student(sid)
     except Exception as e:
         logger.warning(f"Tab detector reset failed for student {sid}: {e}")
+
+    with runtime_warning_state_lock:
+        runtime_warning_state.pop(sid, None)
 
     try:
         face_analyzer, person_detector, decision_engine, UILayer = _get_vision_engines()
@@ -1423,13 +1435,22 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                             'is_prohibited': _label_is_prohibited(label)
                         })
 
-        # OCR fallback/augment for printed on-screen keywords (phone/headphones brands/terms).
-        ocr_hits = _detect_prohibited_text(frame)
-        if ocr_hits:
-            detections.extend(ocr_hits)
-        if not any(_label_is_prohibited(d.get('label', '')) for d in detections):
+        if OCR_OBJECT_FALLBACK_ENABLED:
+            ocr_hits = _detect_prohibited_text(frame)
+            if ocr_hits:
+                detections.extend(ocr_hits)
+        if PHONE_CONTOUR_FALLBACK_ENABLED and not any(_label_is_prohibited(d.get('label', '')) for d in detections):
             detections.extend(_detect_phone_like_contours(frame))
-        return detections
+
+        filtered = []
+        for detection in detections:
+            label = _normalize_label(detection.get('label', ''))
+            if not _label_is_prohibited(label):
+                continue
+            normalized_detection = dict(detection)
+            normalized_detection['label'] = label
+            filtered.append(normalized_detection)
+        return filtered
     except Exception as e:
         logger.error(f"Error in YOLOv8 object detection: {e}", exc_info=True)
         return []
@@ -1551,9 +1572,8 @@ def _run_student_frame_detection(student_id, student_name, frame):
         for w in warnings:
             if "Face not detected" in w:
                 _persist_behavior_violation(sid, student_name, "NO_FACE", "No face detected in camera viewport")
-            # All other rules disabled per user request
-            # elif "Multiple persons" in w:
-            #     _persist_behavior_violation(sid, student_name, "MULTIPLE_FACES", "Multiple persons detected")
+            elif "Multiple persons" in w:
+                _persist_behavior_violation(sid, student_name, "MULTIPLE_FACES", w)
             # elif "Head turned" in w:
             #     _persist_behavior_violation(sid, student_name, "DISTRACTION", "Please look at the screen (Head turned)")
             # elif "Eyes not visible" in w:
@@ -3492,6 +3512,13 @@ def api_upload_session_recording():
         student_id = int(user['Id'])
         student_name = ''.join(ch if ch.isalnum() else '_' for ch in str(user.get('Name') or 'student')).strip('_') or f"student_{student_id}"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        started_at_raw = (request.form.get('started_at') or '').strip()
+        session_start = timestamp
+        if started_at_raw:
+            try:
+                session_start = datetime.fromtimestamp(float(started_at_raw) / 1000.0).strftime("%Y%m%d_%H%M%S")
+            except Exception:
+                session_start = timestamp
 
         content_type = (file.content_type or '').lower()
         ext = '.webm'
@@ -3499,23 +3526,28 @@ def api_upload_session_recording():
             ext = '.mp4'
         elif 'ogg' in content_type:
             ext = '.ogg'
+        elif file.filename and '.' in file.filename:
+            guessed_ext = os.path.splitext(file.filename)[1].lower()
+            if guessed_ext in ('.webm', '.mp4', '.ogg', '.mkv'):
+                ext = guessed_ext
 
         video_dir = os.path.join('static', 'exam_sessions')
         os.makedirs(video_dir, exist_ok=True)
-        filename = f"{student_id}_{student_name}_{timestamp}{ext}"
+        filename = f"{student_id}_{student_name}_{session_start}{ext}"
         output_path = os.path.join(video_dir, filename)
         file.save(output_path)
 
         session_id = _get_active_session_id(student_id)
-        meta_path = os.path.join(video_dir, f"{student_id}_{student_name}_{timestamp}.json")
+        meta_path = os.path.join(video_dir, f"{student_id}_{student_name}_{session_start}.json")
         metadata = {
             'student_id': student_id,
             'student_name': str(user.get('Name') or f"Student {student_id}"),
             'session_id': session_id,
-            'session_start': timestamp,
+            'session_start': session_start,
             'video_path': output_path,
             'embedded_audio': True,
-            'content_type': content_type or 'video/webm'
+            'content_type': content_type or 'video/webm',
+            'file_size': os.path.getsize(output_path) if os.path.exists(output_path) else 0
         }
         try:
             with open(meta_path, 'w', encoding='utf-8') as f:
@@ -3931,11 +3963,14 @@ if MONITORING_ENABLED and socketio:
     @socketio.on('admin_clear_warnings', namespace='/admin')
     def handle_admin_clear_warnings(data):
         student_id = str(data.get('student_id'))
-        if warning_system:
-            warning_system.reset_student(student_id)
-            emit('warnings_cleared', {'student_id': student_id}, namespace='/admin')
-            # Notify the student UI so it clears the warning display locally
-            socketio.emit('warnings_cleared', {'student_id': student_id}, namespace='/student')
+        _reset_exam_runtime_state(student_id)
+        emit('warnings_cleared', {'student_id': student_id, 'warnings': 0, 'violations': []}, namespace='/admin')
+        socketio.emit(
+            'warnings_cleared',
+            {'student_id': student_id, 'warnings': 0, 'violations': []},
+            namespace='/student',
+            room=f"student:{student_id}"
+        )
 
     @socketio.on('admin_force_terminate', namespace='/admin')
     def handle_admin_force_terminate(data):

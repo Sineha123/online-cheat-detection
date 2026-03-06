@@ -1,6 +1,7 @@
 from ultralytics import YOLO
 import config_vision as config
 import threading
+import re
 
 # Initialize heavily loaded model globally, once
 _global_yolo_model = YOLO(config.YOLO_MODEL_NAME)
@@ -8,22 +9,46 @@ _yolo_lock = threading.Lock()
 
 class PersonDetector:
     def __init__(self):
-        # Mapping COCO class IDs to readable names
-        self.class_names = {
-            67: "Phone",
-            73: "Book",
-            77: "Laptop"
+        self.class_names = getattr(_global_yolo_model, 'names', {}) or {}
+        self.selective_label_map = {
+            'cellphone': 'Phone',
+            'cell phone': 'Phone',
+            'mobile phone': 'Phone',
+            'smartphone': 'Phone',
+            'phone': 'Phone',
+            'camera': 'Camera',
+            'webcam': 'Camera',
+            'book': 'Book',
+            'notebook': 'Book',
+            'headphone': 'Earphones',
+            'headphones': 'Earphones',
+            'earphone': 'Earphones',
+            'earphones': 'Earphones',
+            'earbud': 'Earphones',
+            'earbuds': 'Earphones',
+            'airpods': 'Earphones',
+            'laptop': 'Laptop'
         }
+
+    def _normalize_label(self, label):
+        value = str(label or '').strip().lower()
+        direct = self.selective_label_map.get(value)
+        if direct:
+            return direct
+        tokens = set(re.findall(r'[a-z0-9]+', value))
+        for raw, mapped in self.selective_label_map.items():
+            raw_tokens = set(re.findall(r'[a-z0-9]+', raw))
+            if raw_tokens and raw_tokens.issubset(tokens):
+                return mapped
+        return None
         
     def process_frame(self, frame):
         """
         Runs YOLOv8 person detection and banned object detection on the frame.
         Stateless: Safe for concurrent threads.
         """
-        classes_to_detect = [config.YOLO_PERSON_CLASS] + config.YOLO_BANNED_CLASSES
-        
         with _yolo_lock:
-            results = _global_yolo_model(frame, verbose=False, classes=classes_to_detect)
+            results = _global_yolo_model(frame, verbose=False)
         
         person_count = 0
         banned_objects = []
@@ -39,12 +64,16 @@ class PersonDetector:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 bbox = (int(x1), int(y1), int(x2), int(y2), conf)
                 
-                if cls_id == config.YOLO_PERSON_CLASS:
+                if cls_id == config.YOLO_PERSON_CLASS and conf >= config.YOLO_PERSON_CONFIDENCE:
                     person_count += 1
                     bboxes.append(bbox)
-                elif cls_id in self.class_names:
+                else:
+                    raw_label = self.class_names.get(cls_id, cls_id) if isinstance(self.class_names, dict) else cls_id
+                    normalized_label = self._normalize_label(raw_label)
+                    if not normalized_label or conf < config.YOLO_BANNED_CONFIDENCE:
+                        continue
                     banned_objects.append({
-                        "label": self.class_names[cls_id],
+                        "label": normalized_label,
                         "bbox": bbox
                     })
                 

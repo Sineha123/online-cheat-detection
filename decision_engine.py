@@ -53,6 +53,11 @@ class DecisionEngine:
         if self._check_condition(state, "banned_object", has_banned_object, config.TIME_BANNED_OBJECT, current_time):
             labels = ", ".join(sorted({str(obj.get("label", "Object")) for obj in banned_objects})) or "Object"
             active_alerts.append(f"Prohibited object detected: {labels}")
+
+        # Rule 3 - Multiple persons/faces in frame
+        has_multiple_persons = int(person_count or 0) > 1
+        if self._check_condition(state, "multiple_persons", has_multiple_persons, config.TIME_MULTIPLE_PERSONS, current_time):
+            active_alerts.append(f"Multiple persons detected ({int(person_count)})")
             
         # --- Rule Aggregation and Scoring Logic ---
         num_alerts = len(active_alerts)

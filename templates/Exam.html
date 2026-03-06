@@ -1476,10 +1476,16 @@
         // EXAM FINISH FUNCTION
         // ============================================
         function finishExam() {
+            return finishExamAsync();
+        }
+
+        async function finishExamAsync() {
             clearInterval(timerInterval);
             examStarted = false;
-            voiceMonitor.stop();
-            sessionRecorder.stop();
+            await Promise.allSettled([
+                voiceMonitor.stop(),
+                sessionRecorder.stop()
+            ]);
 
             const totalScore = selectedQuestions.length * MARKS_PER_QUESTION;
             const percentage = Math.round((score / totalScore) * 100);
@@ -2368,6 +2374,12 @@
                         this.video.addEventListener('loadedmetadata', done);
                         setTimeout(done, 1200);
                     });
+                    if (this.canvas && this.video.videoWidth > 0 && this.video.videoHeight > 0) {
+                        this.canvas.width = 640;
+                        this.canvas.height = 480;
+                        const ctx = this.canvas.getContext('2d');
+                        if (ctx) ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+                    }
                     this.running = true;
                     this.initAttempts = 0;
                     this.startLoop();
@@ -2779,16 +2791,27 @@
                 }, 150);
             },
 
-            stop() {
+            async stop() {
                 this.started = false;
                 if (this.timer) clearInterval(this.timer);
                 if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-                    try { this.mediaRecorder.stop(); } catch (_) { }
+                    const recorder = this.mediaRecorder;
+                    await new Promise((resolve) => {
+                        const finish = () => {
+                            recorder.removeEventListener('stop', finish);
+                            resolve();
+                        };
+                        recorder.addEventListener('stop', finish, { once: true });
+                        try {
+                            if (typeof recorder.requestData === 'function') recorder.requestData();
+                        } catch (_) { }
+                        try { recorder.stop(); } catch (_) { resolve(); }
+                    });
                 }
                 if (this.source) { try { this.source.disconnect(); } catch (_) { } }
                 if (this.context) { try { this.context.close(); } catch (_) { } }
                 if (this.stream) this.stream.getTracks().forEach(t => t.stop());
-                setTimeout(() => { this.uploadRecording(); }, 250);
+                await this.uploadRecording();
                 this.stream = null;
                 this.context = null;
                 this.analyser = null;
@@ -2813,11 +2836,18 @@
             started: false,
             uploadDone: false,
             mimeType: 'video/webm',
+            stopPromise: null,
 
             async start() {
                 if (this.started) return true;
-                const videoTrack = remoteFrameUploader.stream && remoteFrameUploader.stream.getVideoTracks
-                    ? remoteFrameUploader.stream.getVideoTracks()[0]
+                if (!remoteFrameUploader.canvas || !remoteFrameUploader.canvas.captureStream) {
+                    console.log('Session recorder skipped: recording canvas unavailable');
+                    return false;
+                }
+                const captureFps = Math.max(8, Number(remoteFrameUploader.targetFps) || 15);
+                const canvasStream = remoteFrameUploader.canvas.captureStream(captureFps);
+                const videoTrack = canvasStream && canvasStream.getVideoTracks
+                    ? canvasStream.getVideoTracks()[0]
                     : null;
                 const audioTrack = voiceMonitor.stream && voiceMonitor.stream.getAudioTracks
                     ? voiceMonitor.stream.getAudioTracks()[0]
@@ -2826,16 +2856,17 @@
                     console.log('Session recorder skipped: no live video track');
                     return false;
                 }
-                if (!audioTrack || audioTrack.readyState !== 'live') {
-                    console.log('Session recorder skipped: no live audio track');
-                    return false;
-                }
                 try {
-                    const videoClone = videoTrack.clone();
-                    const audioClone = audioTrack.clone();
-                    this.stream = new MediaStream([videoClone, audioClone]);
+                    const tracks = [videoTrack.clone ? videoTrack.clone() : videoTrack];
+                    if (audioTrack && audioTrack.readyState === 'live') {
+                        tracks.push(audioTrack.clone ? audioTrack.clone() : audioTrack);
+                    } else {
+                        console.log('Session recorder continuing without live audio track');
+                    }
+                    this.stream = new MediaStream(tracks);
                     this.chunks = [];
                     this.uploadDone = false;
+                    this.stopPromise = null;
                     const mimeCandidates = [
                         'video/webm;codecs=vp9,opus',
                         'video/webm;codecs=vp8,opus',
@@ -2854,11 +2885,12 @@
                     this.mediaRecorder.ondataavailable = (ev) => {
                         if (ev.data && ev.data.size > 0) this.chunks.push(ev.data);
                     };
-                    this.mediaRecorder.onstop = () => {
-                        setTimeout(() => {
-                            this.uploadRecording();
+                    this.mediaRecorder.onstop = async () => {
+                        try {
+                            await this.uploadRecording();
+                        } finally {
                             this.cleanup();
-                        }, 150);
+                        }
                     };
                     this.mediaRecorder.start(2000);
                     this.started = true;
@@ -2881,24 +2913,40 @@
                     const form = new FormData();
                     form.append('recording', blob, `exam_session.${ext}`);
                     form.append('started_at', String(sessionRecordingStartedAt || Date.now()));
-                    await fetch('/api/upload-session-recording', {
+                    const response = await fetch('/api/upload-session-recording', {
                         method: 'POST',
                         headers: { 'X-CSRF-Token': CSRF_TOKEN },
-                        body: form,
-                        keepalive: true
+                        body: form
                     });
+                    if (!response.ok) throw new Error(`Upload failed (${response.status})`);
                 } catch (err) {
                     console.log('Session recording upload failed:', err);
+                    this.uploadDone = false;
                 }
             },
 
-            stop() {
-                if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-                    try { this.mediaRecorder.stop(); } catch (_) { }
-                } else {
-                    this.uploadRecording();
-                    this.cleanup();
-                }
+            async stop() {
+                if (this.stopPromise) return this.stopPromise;
+                this.stopPromise = (async () => {
+                    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+                        const recorder = this.mediaRecorder;
+                        await new Promise((resolve) => {
+                            const finish = () => {
+                                recorder.removeEventListener('stop', finish);
+                                resolve();
+                            };
+                            recorder.addEventListener('stop', finish, { once: true });
+                            try {
+                                if (typeof recorder.requestData === 'function') recorder.requestData();
+                            } catch (_) { }
+                            try { recorder.stop(); } catch (_) { resolve(); }
+                        });
+                    } else {
+                        await this.uploadRecording();
+                        this.cleanup();
+                    }
+                })();
+                return this.stopPromise;
             },
 
             cleanup() {
