@@ -48,6 +48,17 @@ class DecisionEngine:
         if self._check_condition(state, "no_face", not face_detected, config.TIME_NO_FACE, current_time):
             active_alerts.append("Face not detected")
 
+        # Rule 1b - Eyes / gaze off-screen
+        gaze_off = abs(iris_offset_ratio) > config.IRIS_OFFSET_THRESHOLD
+        if self._check_condition(state, "gaze_off", gaze_off, config.TIME_GAZING, current_time):
+            direction = "left" if iris_offset_ratio < 0 else "right"
+            active_alerts.append(f"Gaze off screen ({direction})")
+
+        # Rule 1c - Head turned away
+        if self._check_condition(state, "head_turned", abs(yaw_angle) > config.YAW_THRESHOLD_DEG, config.TIME_HEAD_TURNED, current_time):
+            direction = "left" if yaw_angle < 0 else "right"
+            active_alerts.append(f"Head turned away ({direction})")
+
         # Rule 2 - Prohibited object detection
         has_banned_object = bool(banned_objects)
         if self._check_condition(state, "banned_object", has_banned_object, config.TIME_BANNED_OBJECT, current_time):

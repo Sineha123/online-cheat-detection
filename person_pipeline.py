@@ -11,23 +11,33 @@ class PersonDetector:
     def __init__(self):
         self.class_names = getattr(_global_yolo_model, 'names', {}) or {}
         self.selective_label_map = {
+            # Phones (already implemented, keep as-is)
             'cellphone': 'Phone',
             'cell phone': 'Phone',
             'mobile phone': 'Phone',
             'smartphone': 'Phone',
             'phone': 'Phone',
+            # Cameras
             'camera': 'Camera',
             'webcam': 'Camera',
+            # Books / copies / notebooks
             'book': 'Book',
             'notebook': 'Book',
+            'copy': 'Book',
+            'paper': 'Book',
+            'document': 'Book',
+            # Headphones / earphones
             'headphone': 'Earphones',
             'headphones': 'Earphones',
+            'headset': 'Earphones',
+            'handsfree': 'Earphones',
+            'hands free': 'Earphones',
+            'head free': 'Earphones',
             'earphone': 'Earphones',
             'earphones': 'Earphones',
             'earbud': 'Earphones',
             'earbuds': 'Earphones',
-            'airpods': 'Earphones',
-            'laptop': 'Laptop'
+            'airpods': 'Earphones'
         }
 
     def _normalize_label(self, label):
@@ -53,6 +63,8 @@ class PersonDetector:
         person_count = 0
         banned_objects = []
         bboxes = []
+        h, w, _ = frame.shape
+        frame_area = float(max(h * w, 1))
         
         if len(results) > 0:
             r = results[0]
@@ -63,10 +75,14 @@ class PersonDetector:
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 bbox = (int(x1), int(y1), int(x2), int(y2), conf)
-                
+                area_ratio = ((x2 - x1) * (y2 - y1)) / frame_area
+                aspect = (x2 - x1) / max((y2 - y1), 1)
+
                 if cls_id == config.YOLO_PERSON_CLASS and conf >= config.YOLO_PERSON_CONFIDENCE:
-                    person_count += 1
-                    bboxes.append(bbox)
+                    # Heuristic filters to avoid phantom second-person from objects/books
+                    if 0.03 <= area_ratio <= 0.9 and 0.25 <= aspect <= 0.9:
+                        person_count += 1
+                        bboxes.append(bbox)
                 else:
                     raw_label = self.class_names.get(cls_id, cls_id) if isinstance(self.class_names, dict) else cls_id
                     normalized_label = self._normalize_label(raw_label)

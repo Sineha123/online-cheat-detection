@@ -130,6 +130,35 @@
             width: calc(100% - 80px);
             left: 80px;
         }
+        /* Responsive adjustments */
+        @media (max-width: 1200px) {
+            #sidebar { width: 240px; }
+            #content { width: calc(100% - 240px); left: 240px; }
+            #content.expand { width: calc(100% - 80px); left: 80px; }
+        }
+        @media (max-width: 992px) {
+            #sidebar {
+                width: 260px;
+                transform: translateX(-100%);
+                position: fixed;
+                left: 0;
+                top: 0;
+                height: 100vh;
+                z-index: 3000;
+            }
+            #sidebar.show { transform: translateX(0); }
+            #content, #content.expand { width: 100%; left: 0; }
+            nav { padding: 0 16px; }
+            .head-title { flex-direction: column; align-items: flex-start; gap: 8px; }
+            .live-monitoring-btn { padding: 10px 16px; }
+            .info-data { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+            .active-students-grid { grid-template-columns: 1fr; }
+            .table-responsive { overflow-x: auto; }
+        }
+        @media (max-width: 640px) {
+            .head-title h1 { font-size: 24px; }
+            .card .head h2 { font-size: 28px; }
+        }
 
         /* Navbar */
         nav {
@@ -1668,18 +1697,28 @@
             document.getElementById('active-exams').textContent = activeCount;
         }
 
-        // Update violations count
-        function updateViolationsCount() {
-            // You can implement API call to get violations count
-            // For now, we'll just increment the count
-            const currentCount = parseInt(document.getElementById('total-violations').textContent) || 0;
-            document.getElementById('total-violations').textContent = currentCount + 1;
+        // Update violations count (last 24h) via API
+        async function updateViolationsCount() {
+            try {
+                const res = await fetch('/api/today-violations');
+                const data = await res.json();
+                document.getElementById('total-violations').textContent = data.count || 0;
+            } catch (e) {
+                console.log('Violations count fetch failed', e);
+            }
         }
 
         // Toggle sidebar
-        document.getElementById('menu-btn').addEventListener('click', function () {
-            document.getElementById('sidebar').classList.toggle('hide');
-            document.getElementById('content').classList.toggle('expand');
+        const menuBtn = document.getElementById('menu-btn');
+        const sidebarEl = document.getElementById('sidebar');
+        const contentEl = document.getElementById('content');
+        menuBtn.addEventListener('click', function () {
+            if (window.innerWidth <= 992) {
+                sidebarEl.classList.toggle('show');
+            } else {
+                sidebarEl.classList.toggle('hide');
+                contentEl.classList.toggle('expand');
+            }
         });
 
         // Confirm delete with better UX
@@ -1887,9 +1926,11 @@
             console.log('Admin Dashboard Loaded');
             updateStats();
             fetchActiveStudents();
+            updateViolationsCount();
 
             // Update stats every 30 seconds
             setInterval(updateStats, 30000);
+            setInterval(updateViolationsCount, 30000);
         });
     </script>
 </body>

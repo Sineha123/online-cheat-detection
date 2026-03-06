@@ -1792,7 +1792,7 @@
             syncTimer: null,
             lastServerViolationSignature: '',
             globalWarningGapMs: 4000,        // 4-second global gap
-            postAcknowledgeGraceMs: 3000,
+            postAcknowledgeGraceMs: 4000,    // 4s pause after "I understand"
             duplicateKeyWindowMs: 5000,
             typeCooldownsMs: {
                 'VOICE_DETECTED': 5000,
@@ -1909,6 +1909,13 @@
                 const warningDetails = String(violationData.details || '').trim();
                 const violationKey = `${warningType}|${warningDetails}`;
                 const hasServerCount = typeof violationData.total_warnings === 'number';
+
+                // Always respect the post-acknowledge quiet period, even for server-driven warnings.
+                const graceRemaining = this.acknowledgeGraceUntil - now;
+                if (graceRemaining > 0) {
+                    setTimeout(() => this.addWarning(violationData), graceRemaining);
+                    return;
+                }
 
                 // Avoid rapid back-to-back warnings right after user acknowledges one.
                 if (!hasServerCount && now < this.acknowledgeGraceUntil) return;

@@ -156,7 +156,9 @@
 
         .video-container {
             width: 100%;
-            height: 200px;
+            aspect-ratio: 4 / 3;
+            min-height: 300px;
+            max-height: 460px;
             background: #000;
             position: relative;
             overflow: hidden;
@@ -165,7 +167,21 @@
         .live-feed {
             width: 100%;
             height: 100%;
-            object-fit: cover;
+            object-fit: contain;
+        }
+
+        .warning-pill {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 6px 10px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 12px;
+            backdrop-filter: blur(6px);
+            background: rgba(0, 0, 0, 0.55);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.15);
         }
 
         .no-feed {
@@ -547,19 +563,20 @@
                 document.getElementById('loading-message').style.display = 'none';
                 
                 data.students.forEach(student => {
-                    if (!studentsData[student.student_id]) {
+                    const key = String(student.student_id);
+                    if (!studentsData[key]) {
                         // New student
-                        studentsData[student.student_id] = {
+                        studentsData[key] = {
                             ...student,
-                            startTime: Date.now(),
+                            startTime: null,
                             violations: student.violations || [],
                             lastFrame: null
                         };
                         showAlert(`🎓 ${student.student_name} started exam`, 'success');
                     } else {
                         // Update existing student
-                        studentsData[student.student_id] = {
-                            ...studentsData[student.student_id],
+                        studentsData[key] = {
+                            ...studentsData[key],
                             ...student
                         };
                     }
@@ -571,10 +588,11 @@
         // Handle student violations
         socket.on('student_violation', function(data) {
             console.log('⚠️ Violation detected:', data);
+            const key = String(data.student_id);
             
-            if (!studentsData[data.student_id]) {
-                studentsData[data.student_id] = {
-                    student_id: data.student_id,
+            if (!studentsData[key]) {
+                studentsData[key] = {
+                    student_id: key,
                     student_name: data.student_name || 'Unknown Student',
                     warnings: data.total_warnings || 0,
                     violations: [],
@@ -583,11 +601,11 @@
                 };
             }
             
-            studentsData[data.student_id].warnings = data.total_warnings || 0;
-            studentsData[data.student_id].violations = studentsData[data.student_id].violations || [];
+            studentsData[key].warnings = data.total_warnings || 0;
+            studentsData[key].violations = studentsData[key].violations || [];
             
             if (data.violation) {
-                studentsData[data.student_id].violations.push(data.violation);
+                studentsData[key].violations.push(data.violation);
             }
             
             totalWarnings++;
@@ -601,14 +619,18 @@
         // Handle live video frames
         socket.on('student_frame', function(data) {
             console.log('📹 Received frame for student:', data.student_id);
+            const key = String(data.student_id);
             
             // Update student data with frame
-            if (studentsData[data.student_id]) {
-                studentsData[data.student_id].lastFrame = data.frame;
-                studentsData[data.student_id].lastUpdate = Date.now();
+            if (studentsData[key]) {
+                if (!studentsData[key].startTime) {
+                    studentsData[key].startTime = Date.now(); // start duration when first frame arrives
+                }
+                studentsData[key].lastFrame = data.frame;
+                studentsData[key].lastUpdate = Date.now();
                 
                 // Update mini feed in student card
-                updateStudentCardFrame(data.student_id, data.frame);
+                updateStudentCardFrame(key, data.frame);
                 
                 // Modal uses dedicated MJPEG route; do not override with socket frame.
             }
@@ -738,7 +760,8 @@
             const warningLevel = Math.min(student.warnings || 0, 3);
             const warningClass = `warning-${warningLevel}`;
             
-            const duration = Math.floor((Date.now() - (student.startTime || Date.now())) / 1000);
+            const hasStart = !!student.startTime;
+            const duration = hasStart ? Math.floor((Date.now() - student.startTime) / 1000) : 0;
             
             card.innerHTML = `
                 <div class="student-header ${warningClass}">
@@ -750,6 +773,7 @@
                     </span>
                 </div>
                 <div class="video-container">
+                    <div class="warning-pill ${warningClass}">${Math.min(student.warnings || 0, 3)}/3</div>
                     <img class="live-feed" data-mode="mjpeg" src="/admin/live/${student.student_id}" alt="Live Feed">
                 </div>
                 <div class="student-info">
@@ -769,7 +793,7 @@
                     </div>
                     <div class="info-row">
                         <span class="info-label">Duration:</span>
-                        <span class="info-value">${formatDuration(duration)}</span>
+                        <span class="info-value">${hasStart ? formatDuration(duration) : '--'}</span>
                     </div>
                 </div>
                 ${student.violations && student.violations.length > 0 ? `
@@ -912,14 +936,14 @@
         setInterval(() => {
             document.querySelectorAll('.student-card').forEach(card => {
                 const sidText = card.id.replace('student-', '');
-                const sid = parseInt(sidText, 10);
-                if (!studentsData[sid]) return;
-                const durationEl = card.querySelector('.info-row:last-child .info-value');
-                if (durationEl) {
-                    const secs = Math.floor((Date.now() - (studentsData[sid].startTime || Date.now())) / 1000);
-                    durationEl.textContent = formatDuration(Math.max(0, secs));
-                }
-            });
+            const key = String(sidText);
+            if (!studentsData[key] || !studentsData[key].startTime) return;
+            const durationEl = card.querySelector('.info-row:last-child .info-value');
+            if (durationEl) {
+                const secs = Math.floor((Date.now() - (studentsData[key].startTime || Date.now())) / 1000);
+                durationEl.textContent = formatDuration(Math.max(0, secs));
+            }
+        });
             updateDashboard(false);
         }, 1000);
 
@@ -933,20 +957,30 @@
                 .then(data => {
                     let changed = false;
                     Object.keys(data).forEach(sid => {
-                        const info = data[sid];
-                        const numSid = parseInt(sid);
-                        if (studentsData[numSid]) {
-                            // Update warnings count from server truth
-                            if (studentsData[numSid].warnings !== info.warnings) {
-                                studentsData[numSid].warnings = info.warnings;
-                                totalWarnings = Math.max(totalWarnings, info.warnings);
-                                changed = true;
-                            }
-                            // Merge violations
-                            if (info.violations && info.violations.length > (studentsData[numSid].violations || []).length) {
-                                studentsData[numSid].violations = info.violations;
-                                changed = true;
-                            }
+                        const info = data[sid] || {};
+                        const key = String(sid);
+                        // Ensure we have a record for this student
+                        if (!studentsData[key]) {
+                            studentsData[key] = {
+                                student_id: key,
+                                student_name: info.name || `Student ${key}`,
+                                warnings: 0,
+                                violations: [],
+                                startTime: Date.now(),
+                                lastFrame: null
+                            };
+                            changed = true;
+                        }
+                        // Update warnings count from server truth
+                        if (studentsData[key].warnings !== info.warnings) {
+                            studentsData[key].warnings = info.warnings;
+                            totalWarnings = Math.max(totalWarnings, info.warnings);
+                            changed = true;
+                        }
+                        // Merge violations
+                        if (info.violations && info.violations.length > (studentsData[key].violations || []).length) {
+                            studentsData[key].violations = info.violations;
+                            changed = true;
                         }
                     });
                     if (changed) updateDashboard();

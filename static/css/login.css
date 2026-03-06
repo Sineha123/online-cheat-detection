@@ -6,7 +6,9 @@
 
 body{
     font-family: 'Poppins', sans-serif;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
+    background: #f7f8fb;
 }
 
 .wave{
@@ -18,12 +20,14 @@ body{
 }
 
 .container{
-    width: 100vw;
-    height: 100vh;
+    width: min(1200px, 100vw);
+    min-height: 100vh;
+    margin: 0 auto;
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    grid-gap :7rem;
-    padding: 0 2rem;
+    grid-template-columns: repeat(2, minmax(320px, 1fr));
+    grid-gap: clamp(2rem, 3vw, 7rem);
+    padding: clamp(1.5rem, 4vw, 4rem);
+    align-items: center;
 }
 
 .img{
@@ -40,7 +44,9 @@ body{
 }
 
 .img img{
-	width: 500px;
+	width: min(520px, 40vw);
+	max-width: 100%;
+	height: auto;
 }
 
 form{
@@ -183,9 +189,9 @@ a:hover{
 }
 
 
-@media screen and (max-width: 1050px){
+@media screen and (max-width: 1200px){
 	.container{
-		grid-gap: 5rem;
+		grid-template-columns: 1fr 1fr;
 	}
 }
 
@@ -219,6 +225,7 @@ a:hover{
 
 	.login-content{
 		justify-content: center;
+        padding: 1rem 0;
 	}
 }
 .error{

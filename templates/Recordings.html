@@ -90,7 +90,7 @@
             <input type="text" id="recording-search" class="form-control" placeholder="Search by student name...">
         </div>
         <div class="row">
-            <div class="col-md-6 mb-4">
+            <div class="col-lg-8 col-md-10 mx-auto mb-4">
                 <div class="card">
                     <div class="card-header bg-white">
                         <strong><i class='bx bxs-video'></i> Video Recordings</strong>
@@ -162,52 +162,6 @@
                 </div>
             </div>
 
-            <div class="col-md-6 mb-4">
-                <div class="card">
-                    <div class="card-header bg-white">
-                        <strong><i class='bx bxs-microphone'></i> Audio Recordings</strong>
-                        <span class="badge-lite ml-2">{{ audios|length }} files</span>
-                    </div>
-                    <div class="card-body p-0">
-                        {% if audios %}
-                            {% for a in audios %}
-                            <div class="file-row" data-student="{{ (a.student_name or '')|lower }}">
-                                <div>
-                                    <div class="file-name">{{ a.name }}</div>
-                                    <div class="file-meta">
-                                        {{ (a.size / (1024*1024))|round(2) }} MB
-                                        {% if a.student_name %}
-                                            • {{ a.student_name }}{% if a.student_id %} (ID {{ a.student_id }}){% endif %}
-                                        {% endif %}
-                                        {% if a.session_start %}
-                                            • {{ a.session_start }}
-                                        {% endif %}
-                                    </div>
-                                </div>
-                                <div class="d-flex align-items-center" style="gap:8px;">
-                                    <button class="btn btn-sm btn-outline-secondary" type="button" data-toggle="collapse" data-target="#audio-{{ loop.index }}">
-                                        <i class='bx bxs-play'></i> Preview
-                                    </button>
-                                    <a class="btn btn-sm btn-download" href="{{ url_for('download_recording_audio', filename=a.name) }}">
-                                        <i class='bx bxs-download'></i> Download
-                                    </a>
-                                </div>
-                            </div>
-                            <div class="collapse" id="audio-{{ loop.index }}">
-                                <div class="p-3">
-                                    <audio controls style="width:100%;">
-                                        <source src="{{ url_for('static', filename='audio_recordings/' + a.name) }}">
-                                        Your browser does not support the audio tag.
-                                    </audio>
-                                </div>
-                            </div>
-                            {% endfor %}
-                        {% else %}
-                            <div class="p-4 text-center text-muted">No audio recordings found.</div>
-                        {% endif %}
-                    </div>
-                </div>
-            </div>
         </div>
     </div>
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>

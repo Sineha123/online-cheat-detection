@@ -466,9 +466,8 @@ PHONE_CONTOUR_FALLBACK_ENABLED = (os.getenv('PHONE_CONTOUR_FALLBACK_ENABLED', '0
 PROHIBITED_LABELS = {
     'cell phone', 'mobile phone', 'phone', 'smartphone',
     'camera', 'webcam',
-    'laptop', 'tablet', 'ipad',
-    'book', 'notebook',
-    'headphones', 'earphones', 'headset', 'earbuds', 'airpods'
+    'book', 'notebook', 'copy', 'paper', 'document',
+    'headphones', 'earphones', 'headset', 'earbuds', 'airpods', 'headfree', 'handsfree'
 }
 
 def _normalize_label(label):
@@ -480,9 +479,17 @@ def _normalize_label(label):
         'mobile phone': 'cell phone',
         'smartphone': 'cell phone',
         'notebook': 'book',
+        'copy': 'book',
+        'paper': 'book',
+        'document': 'book',
         'earphone': 'earphones',
         'earbud': 'earbuds',
         'headphone': 'headphones',
+        'headset': 'headphones',
+        'handsfree': 'headphones',
+        'hands free': 'headphones',
+        'head free': 'headphones',
+        'headfree': 'headphones',
         'airpod': 'airpods',
         'web cam': 'webcam',
         'books': 'book',
@@ -1189,6 +1196,8 @@ def _trigger_violation(student_id, student_name, violation_type, details, cooldo
 def _persist_object_violation(student_id, student_name, label, confidence):
     sid = str(student_id)
     norm_label = _normalize_label(label)
+    if not _label_is_prohibited(norm_label):
+        return False
     details = f"Detected prohibited object: {norm_label} ({confidence:.2f})"
     logger.info(f"[object_violation] student={sid} label={norm_label} conf={confidence:.2f}")
     return _trigger_violation(
@@ -1559,9 +1568,46 @@ def _run_student_frame_detection(student_id, student_name, frame):
         
         # 1. Face Analysis
         face_detected, yaw_angle, ear, iris_offset, landmarks = face_analyzer.process_frame(frame_rgb)
+
+        face_bbox = None
+        if landmarks:
+            xs = [p.x for p in landmarks]
+            ys = [p.y for p in landmarks]
+            x1 = max(min(xs) * frame.shape[1] - 10, 0)
+            y1 = max(min(ys) * frame.shape[0] - 10, 0)
+            x2 = min(max(xs) * frame.shape[1] + 10, frame.shape[1])
+            y2 = min(max(ys) * frame.shape[0] + 10, frame.shape[0])
+            face_bbox = (int(x1), int(y1), int(x2), int(y2))
         
         # 2. Person & Object Detection
         person_count, bboxes, banned_objects = person_detector.process_frame(processed)
+
+        # Reclassify / filter banned objects using face overlap to reduce false phones-near-ear
+        def bbox_iou(b1, b2):
+            xa = max(b1[0], b2[0]); ya = max(b1[1], b2[1])
+            xb = min(b1[2], b2[2]); yb = min(b1[3], b2[3])
+            inter = max(0, xb - xa) * max(0, yb - ya)
+            if inter == 0: return 0.0
+            area1 = max(0, b1[2]-b1[0]) * max(0, b1[3]-b1[1])
+            area2 = max(0, b2[2]-b2[0]) * max(0, b2[3]-b2[1])
+            return inter / max(area1 + area2 - inter, 1)
+
+        if face_bbox:
+            filtered = []
+            for obj in banned_objects:
+                bbox = obj.get('bbox') or (0,0,0,0,0)
+                iou = bbox_iou(bbox, face_bbox)
+                if obj.get('label') == 'Phone':
+                    # Ignore phones overlapping the face (likely mistaken headset/ear)
+                    if iou > 0.1:
+                        # If hugging the ear, treat as earphones instead of phone
+                        if iou > 0.3:
+                            obj = dict(obj)
+                            obj['label'] = 'Earphones'
+                            filtered.append(obj)
+                        continue
+                filtered.append(obj)
+            banned_objects = filtered
         
         # 3. Evaluate Rule Violations
         warnings, penalty_score = decision_engine.evaluate(
@@ -1574,6 +1620,10 @@ def _run_student_frame_detection(student_id, student_name, frame):
                 _persist_behavior_violation(sid, student_name, "NO_FACE", "No face detected in camera viewport")
             elif "Multiple persons" in w:
                 _persist_behavior_violation(sid, student_name, "MULTIPLE_FACES", w)
+            elif "Gaze off screen" in w:
+                _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
+            elif "Head turned away" in w:
+                _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
             # elif "Head turned" in w:
             #     _persist_behavior_violation(sid, student_name, "DISTRACTION", "Please look at the screen (Head turned)")
             # elif "Eyes not visible" in w:
@@ -1586,8 +1636,17 @@ def _run_student_frame_detection(student_id, student_name, frame):
             confidence = float(bbox[4]) if len(bbox) >= 5 else 0.0
             _persist_object_violation(sid, student_name, obj.get('label', 'Object'), confidence)
 
+        # Hard-guard: trigger violation immediately when multiple humans detected
+        if int(person_count) > 1:
+            _persist_behavior_violation(
+                sid,
+                student_name,
+                "MULTIPLE_FACES",
+                f"Detected {int(person_count)} persons in camera"
+            )
+
         # 5. Draw the unified HUD before encoding
-        UILayer.draw_overlays(processed, warnings, penalty_score, bboxes, banned_objects, 0.0)
+        UILayer.draw_overlays(processed, warnings, penalty_score, bboxes, banned_objects, 0.0, landmarks, iris_offset)
         
         # 6. Push to MJPEG live stream format
         encoded = _encode_frame_to_base64(processed)
