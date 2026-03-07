@@ -18,32 +18,17 @@ class PersonDetector:
         self.class_names = getattr(_global_yolo_model, 'names', {}) or {}
         self.selective_label_map = {
             # Phones â†’ treat as generic electronic device
-            'cellphone': 'Electronic Device',
-            'cell phone': 'Electronic Device',
-            'mobile phone': 'Electronic Device',
-            'smartphone': 'Electronic Device',
-            'phone': 'Electronic Device',
-            # Cameras
-            'camera': 'Camera',
-            'webcam': 'Camera',
+            'cellphone': 'Mobile Phone',
+            'cell phone': 'Mobile Phone',
+            'mobile phone': 'Mobile Phone',
+            'smartphone': 'Mobile Phone',
+            'phone': 'Mobile Phone',
             # Books / copies / notebooks
             'book': 'Book',
             'notebook': 'Book',
-            'copy': 'Book',
-            'paper': 'Book',
-            'document': 'Book',
-            # Headphones / earphones
-            'headphone': 'Electronic Device',
-            'headphones': 'Electronic Device',
-            'headset': 'Electronic Device',
-            'handsfree': 'Electronic Device',
-            'hands free': 'Electronic Device',
-            'head free': 'Electronic Device',
-            'earphone': 'Electronic Device',
-            'earphones': 'Electronic Device',
-            'earbud': 'Electronic Device',
-            'earbuds': 'Electronic Device',
-            'airpods': 'Electronic Device'
+            'copy': 'Document',
+            'paper': 'Document',
+            'document': 'Document',
         }
 
     def _normalize_label(self, label):
@@ -58,7 +43,7 @@ class PersonDetector:
                 return mapped
         return None
         
-    def process_frame(self, frame):
+    def process_frame(self, frame, face_bbox=None):
         """
         Runs YOLOv8 person detection and banned object detection on the frame.
         Stateless: Safe for concurrent threads.
@@ -99,7 +84,11 @@ class PersonDetector:
                     normalized_label = self._normalize_label(raw_label)
                     if conf < config.YOLO_BANNED_CONFIDENCE:
                         continue
-                    label = normalized_label or ("Electronic Device" if cls_id in getattr(config, "YOLO_BANNED_CLASSES", []) else None)
+                    if area_ratio < getattr(config, "BANNED_MIN_AREA_RATIO", 0.0025):
+                        continue
+                    if aspect < getattr(config, "BANNED_MIN_ASPECT", 0.15) or aspect > getattr(config, "BANNED_MAX_ASPECT", 4.0):
+                        continue
+                    label = normalized_label or ("Mobile Phone" if cls_id in getattr(config, "YOLO_BANNED_CLASSES", []) else None)
                     if not label:
                         continue
                     banned_objects.append({
@@ -128,13 +117,13 @@ class PersonDetector:
             lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
             l_channel = lab[:, :, 0]
 
-            bright_thresh = getattr(config, "PAPER_BRIGHT_THRESH", 170)
+            bright_thresh = getattr(config, "PAPER_BRIGHT_THRESH", 190)
             # Combine brightness mask + edges to catch bright or low-texture paper
             _, bright_mask = cv2.threshold(l_channel, bright_thresh, 255, cv2.THRESH_BINARY)
             blur = cv2.GaussianBlur(bright_mask, (5, 5), 0)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
             closed = cv2.morphologyEx(blur, cv2.MORPH_CLOSE, kernel, iterations=2)
-            edges = cv2.Canny(closed, 40, 120)
+            edges = cv2.Canny(closed, 50, 140)
             combined = cv2.bitwise_or(closed, edges)
 
             contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -143,7 +132,7 @@ class PersonDetector:
                 if area <= 1:
                     continue
                 area_ratio = area / frame_area
-                if area_ratio < getattr(config, "PAPER_MIN_AREA_RATIO", 0.003) or area_ratio > getattr(config, "PAPER_MAX_AREA_RATIO", 0.85):
+                if area_ratio < getattr(config, "PAPER_MIN_AREA_RATIO", 0.010) or area_ratio > getattr(config, "PAPER_MAX_AREA_RATIO", 0.70):
                     continue
 
                 rect = cv2.minAreaRect(cnt)
@@ -154,8 +143,8 @@ class PersonDetector:
 
                 x, y, ww, hh = cv2.boundingRect(cnt)
                 aspect = ww / max(hh, 1)
-                min_aspect = getattr(config, "PAPER_MIN_ASPECT", 0.20)
-                max_aspect = getattr(config, "PAPER_MAX_ASPECT", 3.0)
+                min_aspect = getattr(config, "PAPER_MIN_ASPECT", 0.30)
+                max_aspect = getattr(config, "PAPER_MAX_ASPECT", 2.4)
                 if aspect < min_aspect and aspect_rot < min_aspect:
                     continue
                 if aspect > max_aspect and aspect_rot > max_aspect:
@@ -165,10 +154,10 @@ class PersonDetector:
                 region_mean = 0.0
                 if hh > 0 and ww > 0:
                     region_mean = cv2.mean(l_channel[y:y+hh, x:x+ww])[0]
-                if region_mean < (bright_thresh - 15):
+                if region_mean < (bright_thresh - 10):
                     continue
 
-                bbox = (int(x), int(y), int(x + ww), int(y + hh), 0.55)
+                bbox = (int(x), int(y), int(x + ww), int(y + hh), 0.65)
                 # Skip duplicates that overlap with an existing paper box
                 if any(_bbox_iou(bbox, existing) > 0.6 for existing in paper_candidates):
                     continue
@@ -179,13 +168,14 @@ class PersonDetector:
                 })
 
             # Edge density fallback for low-contrast paper filling most of the view
-            edges_lo = cv2.Canny(gray, 50, 130)
+            edges_lo = cv2.Canny(gray, 60, 150)
             density = float(cv2.countNonZero(edges_lo)) / float(edges_lo.size or 1)
-            if density > getattr(config, "PAPER_EDGE_DENSITY", 0.030):
+            if density > getattr(config, "PAPER_EDGE_DENSITY", 0.050):
                 h2, w2 = gray.shape[:2]
-                bbox = (int(w2 * 0.04), int(h2 * 0.04), int(w2 * 0.96), int(h2 * 0.96), 0.35)
+                bbox = (int(w2 * 0.04), int(h2 * 0.04), int(w2 * 0.96), int(h2 * 0.96), 0.60)
                 if not any(_bbox_iou(bbox, existing) > 0.6 for existing in paper_candidates):
                     banned_objects.append({"label": "Paper", "bbox": bbox})
+
         except Exception:
             pass
                 

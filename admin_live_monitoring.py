@@ -911,6 +911,9 @@ class AdminMonitor:
                         'smartphone': 'cell phone',
                         'mobile': 'cell phone',
                         'phone': 'cell phone',
+                        'electronicdevice': 'cell phone',
+                        'electronic device': 'cell phone',
+                        'device': 'cell phone',
                     }
                     prohibited_base = {'cell phone', 'book', 'laptop', 'keyboard', 'mouse', 'remote'}
 
@@ -929,7 +932,8 @@ class AdminMonitor:
                             person_objects.append(obj)
                         is_phone_like = ('phone' in norm_label) or ('mobile' in norm_label) or ('smart' in norm_label)
                         # Strict mode requested: flag any confident non-person object as prohibited.
-                        strict_non_person = (norm_label != 'person' and conf >= 0.18)
+                        # Only treat as prohibited if confidence is strong enough to match server threshold
+                        strict_non_person = (norm_label != 'person' and conf >= 0.60)
                         if norm_label in prohibited_base or is_phone_like or strict_non_person:
                             normalized_obj = dict(obj)
                             normalized_obj['label'] = 'cell phone' if is_phone_like else norm_label
@@ -983,15 +987,15 @@ class AdminMonitor:
                     
                     # ── WARNING COOLDOWN CONFIG ──────────────────────────────────
                     # Prohibited objects: warn IMMEDIATELY (1st frame hit),
-                    #   then block re-warning for 60 frames (~12s at 5fps)
-                    # Face issues:  require 3 consistent frames, then 30-frame block
+                    #   then block re-warning for 15 frames (~3s at 5fps)
+                    # Face issues:  require 3 consistent frames, then 20-frame block
                     INSTANT_TYPES = {
                         'object_cell phone', 'object_book', 'object_laptop',
                         'object_keyboard', 'object_mouse', 'object_remote', 'object_written material'
                     }
                     CONSISTENT_THRESHOLD = 3   # default frames needed for non-instant violations
-                    INSTANT_COOLDOWN     = 60  # frames between repeat phone/book warnings
-                    FACE_COOLDOWN        = 30  # frames between face violation warnings
+                    INSTANT_COOLDOWN     = 8   # frames between repeat phone/book warnings (~1.6s at 5fps)
+                    FACE_COOLDOWN        = 15  # frames between face violation warnings (~3s at 5fps)
                     THRESHOLD_BY_TYPE = {
                         'multiple_faces': 1,  # raise quickly when second face appears
                         'audio_detected': 1,  # strong voice sensitivity
@@ -1274,6 +1278,3 @@ print("    ✓ Auto-terminate after 3 warnings")
 print("    ✓ Audio Monitoring")
 print("    ✓ Auto-Save Violations (Video + JSON)")
 print("=" * 70)
-
-
-

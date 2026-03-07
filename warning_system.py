@@ -223,9 +223,9 @@ class WarningSystem:
 class TabSwitchDetector:
     """Detects tab switching and adds warnings"""
     
-    def __init__(self, warning_system, threshold=3):
+    def __init__(self, warning_system, threshold=1):
         self.warning_system = warning_system
-        self.threshold = threshold
+        self.threshold = max(1, threshold)  # fire on first event by default
         self.lock = threading.Lock()
         self.switch_counts = {}  # student_id -> count
 

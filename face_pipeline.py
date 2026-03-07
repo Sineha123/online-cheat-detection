@@ -4,10 +4,11 @@ import threading
 
 _mp_face_mesh = mp.solutions.face_mesh
 _global_face_mesh = _mp_face_mesh.FaceMesh(
-    static_image_mode=True, # Critical for threads processing disjointed frames
-    max_num_faces=1,
+    static_image_mode=False,  # use video mode for speed + temporal smoothing
+    max_num_faces=3,          # detect multiple faces in frame
     refine_landmarks=True, 
-    min_detection_confidence=0.2,  # Lowered to reduce false "no face" detections and catch half faces
+    min_detection_confidence=0.35,
+    min_tracking_confidence=0.35,
 )
 _face_lock = threading.Lock()
 
@@ -30,8 +31,15 @@ class FaceAnalyzer:
         out_landmarks = []
         
         if results.multi_face_landmarks:
+            # Pick the largest face box to avoid side-face artifacts
+            areas = []
+            for lm in results.multi_face_landmarks:
+                xs = [p.x for p in lm.landmark]
+                ys = [p.y for p in lm.landmark]
+                area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+                areas.append((area, lm))
             face_detected = True
-            face_landmarks = results.multi_face_landmarks[0]
+            face_landmarks = max(areas, key=lambda t: t[0])[1] if areas else results.multi_face_landmarks[0]
             out_landmarks = face_landmarks.landmark
             
             yaw_angle = self._estimate_yaw(out_landmarks)

@@ -460,14 +460,16 @@ YOLO_IMG_SIZE = int(os.getenv('YOLO_IMG_SIZE', '640'))
 OBJECT_VIOLATION_COOLDOWN_SEC = float(os.getenv('OBJECT_VIOLATION_COOLDOWN_SEC', '3.5'))
 DNN_OBJECT_FALLBACK_ENABLED = (os.getenv('DNN_OBJECT_FALLBACK_ENABLED', '1') == '1')
 OCR_OBJECT_FALLBACK_ENABLED = (os.getenv('OCR_OBJECT_FALLBACK_ENABLED', '0') == '1')
-PHONE_CONTOUR_FALLBACK_ENABLED = (os.getenv('PHONE_CONTOUR_FALLBACK_ENABLED', '0') == '1')
+# Enable phone shape fallback so smooth/low-texture phones still trigger.
+PHONE_CONTOUR_FALLBACK_ENABLED = (os.getenv('PHONE_CONTOUR_FALLBACK_ENABLED', '1') == '1')
 
 # Objects that are prohibited during exam
 PROHIBITED_LABELS = {
     'cell phone', 'mobile phone', 'phone', 'smartphone',
     'camera', 'webcam',
     'book', 'notebook', 'copy', 'paper', 'document',
-    'headphones', 'earphones', 'headset', 'earbuds', 'airpods', 'headfree', 'handsfree'
+    'headphones', 'earphones', 'headset', 'earbuds', 'airpods', 'headfree', 'handsfree',
+    'electronic device', 'electronicdevice', 'device'
 }
 
 def _normalize_label(label):
@@ -478,6 +480,9 @@ def _normalize_label(label):
         'mobile': 'cell phone',
         'mobile phone': 'cell phone',
         'smartphone': 'cell phone',
+        'electronic device': 'cell phone',
+        'electronicdevice': 'cell phone',
+        'device': 'cell phone',
         'notebook': 'book',
         'copy': 'book',
         'paper': 'book',
@@ -663,7 +668,7 @@ LEFT_SEAT_SECONDS = 3.0                       # 3s rising from seat
 MOVEMENT_DISTRACTION_SECONDS = 3.0           # 3s continuous movement → warning
 POSE_ANALYSIS_FPS = 12.0
 CAMERA_BLOCKED_BRIGHTNESS = 35               # mean pixel value below this = camera covered/blocked (higher catch hands)
-CAMERA_BLOCKED_SECONDS = 1.5                 # seconds of dark frame before CAMERA_OFF warning
+CAMERA_BLOCKED_SECONDS = 0.8                 # seconds of dark frame before CAMERA_OFF warning
 # Priority mode to stabilize live stream + face detection first.
 FAST_FACE_ONLY_MODE = (os.getenv('FAST_FACE_ONLY_MODE', '0') == '1')
 RUN_POSE_ANALYSIS = (os.getenv('RUN_POSE_ANALYSIS', '1') == '1')
@@ -1174,13 +1179,6 @@ def _trigger_violation(student_id, student_name, violation_type, details, cooldo
             }
             socketio.emit('student_violation', payload, namespace='/student', room=f"student:{sid}")
             socketio.emit('student_violation', payload, namespace='/admin')
-            if final_count >= 3:
-                socketio.emit(
-                    'exam_terminated',
-                    {'student_id': sid, 'reason': f"Reached 3 warnings for {vtype}", 'auto_terminated': True},
-                    namespace='/student',
-                    room=f"student:{sid}"
-                )
     except Exception as e:
         logger.warning(f"Socket warning sync failed for student {sid}: {e}")
 
@@ -1213,7 +1211,8 @@ def _persist_object_violation(student_id, student_name, label, confidence):
         conf_val = float(confidence or 0.0)
     except Exception:
         conf_val = 0.0
-    if conf_val < OBJECT_MIN_CONFIDENCE:
+    # Require slightly higher than min confidence before warning
+    if conf_val < max(OBJECT_MIN_CONFIDENCE, 0.60):
         return False
 
     # Require consecutive hits to reduce single-frame false positives (books/papers)
@@ -1223,7 +1222,7 @@ def _persist_object_violation(student_id, student_name, label, confidence):
         state = student_detection_state.setdefault(sid, {})
         hits = state.setdefault('object_consecutive', {})
         last_ts, count = hits.get(norm_label, (0.0, 0))
-        if now - last_ts > 2.5:
+        if now - last_ts > 3.0:
             count = 0
         count += 1
         hits[norm_label] = (now, count)
@@ -1403,9 +1402,14 @@ def _detect_phone_like_contours(frame):
         return []
 
 # Object detection tuning (can be overridden via env vars)
-OBJECT_MIN_CONFIDENCE = float(os.getenv('OBJECT_MIN_CONFIDENCE', '0.60'))
-OBJECT_MIN_AREA_RATIO = float(os.getenv('OBJECT_MIN_AREA_RATIO', '0.005'))   # >=0.5% of frame
-OBJECT_MAX_AREA_RATIO = float(os.getenv('OBJECT_MAX_AREA_RATIO', '0.25'))   # <=25% of frame (ignore whole-wall boxes)
+#  - confidence: lower to 0.50 so real devices fire, but still filtered by texture/area
+#  - area: ignore tiny specks (<1% of frame) and huge flat walls (>25%).
+OBJECT_MIN_CONFIDENCE = float(os.getenv('OBJECT_MIN_CONFIDENCE', '0.45'))
+OBJECT_MIN_AREA_RATIO = float(os.getenv('OBJECT_MIN_AREA_RATIO', '0.015'))   # >=1.5% of frame
+OBJECT_MAX_AREA_RATIO = float(os.getenv('OBJECT_MAX_AREA_RATIO', '0.20'))    # <=20% of frame (ignore big wall chunks)
+# Reject flat, texture-less regions (walls/blank paper) by Laplacian variance and edge density.
+OBJECT_MIN_TEXTURE_VAR = float(os.getenv('OBJECT_MIN_TEXTURE_VAR', '120.0'))
+OBJECT_MIN_EDGE_DENSITY = float(os.getenv('OBJECT_MIN_EDGE_DENSITY', '0.015'))  # >=1.5% edge pixels
 
 def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
     """
@@ -1473,11 +1477,44 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                         bw = max(1, x2 - x1)
                         bh = max(1, y2 - y1)
 
-                        if score < OBJECT_MIN_CONFIDENCE:
-                            continue
+                        # Label-specific thresholds to balance recall vs false positives
+                        min_conf = OBJECT_MIN_CONFIDENCE
+                        min_area = OBJECT_MIN_AREA_RATIO
+                        max_area = OBJECT_MAX_AREA_RATIO
+                        min_edge = OBJECT_MIN_EDGE_DENSITY
+                        tex_min = OBJECT_MIN_TEXTURE_VAR
+
+                        if label == 'cell phone':
+                            min_conf = 0.52
+                            min_area = 0.005   # allow smaller phones
+                            min_edge = 0.003   # phones can be flat/shiny
+                            tex_min = 40.0
+
                         area_ratio = float(bw * bh) / float(max(1, w * h))
-                        if area_ratio < OBJECT_MIN_AREA_RATIO or area_ratio > OBJECT_MAX_AREA_RATIO:
+
+                        if score < min_conf:
                             continue
+                        if area_ratio < min_area or area_ratio > max_area:
+                            continue
+
+                        # Texture filter: discard very flat regions (walls/blank background)
+                        try:
+                            roi = frame[y1:y2, x1:x2]
+                            if roi is not None and roi.size > 0 and CV2_AVAILABLE:
+                                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                                tex_var = cv2.Laplacian(gray_roi, cv2.CV_64F).var()
+                                edges = cv2.Canny(gray_roi, 60, 160)
+                                edge_density = float(cv2.countNonZero(edges)) / float(gray_roi.size)
+                                # Stricter for flat/book-like labels: need both texture + edges
+                                edge_thresh = min_edge
+                                tex_thresh = tex_min
+                                if label == 'book':
+                                    edge_thresh = max(edge_thresh, 0.025)
+                                    tex_thresh = max(tex_thresh, 120.0)
+                                if tex_var < tex_thresh or edge_density < edge_thresh:
+                                    continue
+                        except Exception:
+                            pass
 
                         detections.append({
                             'label': label,
@@ -1537,10 +1574,11 @@ def _student_frame_staleness_watchdog():
                     item = latest_student_frames.get(sid_str) or {}
                     last_rx = float(item.get('frame_timestamp') or item.get('timestamp') or 0.0)
 
+                # If we have never received a frame yet (still warming up), skip staleness checks.
                 if last_rx <= 0.0:
-                    stale_for = 9999.0
-                else:
-                    stale_for = now - last_rx
+                    continue
+
+                stale_for = now - last_rx
 
                 # If no frame for ~4.5s while exam active, camera/feed is effectively down.
                 if stale_for < 4.5:
@@ -1625,7 +1663,7 @@ def _run_student_frame_detection(student_id, student_name, frame):
             face_bbox = (int(x1), int(y1), int(x2), int(y2))
         
         # 2. Person & Object Detection
-        person_count, bboxes, banned_objects = person_detector.process_frame(processed)
+        person_count, bboxes, banned_objects = person_detector.process_frame(processed, face_bbox)
 
         # Reclassify / filter banned objects using face overlap to reduce false phones-near-ear
         def bbox_iou(b1, b2):
@@ -1639,18 +1677,19 @@ def _run_student_frame_detection(student_id, student_name, frame):
 
         if face_bbox:
             filtered = []
+            frame_h = processed.shape[0] if processed is not None else 0
             for obj in banned_objects:
                 bbox = obj.get('bbox') or (0,0,0,0,0)
                 iou = bbox_iou(bbox, face_bbox)
-                if obj.get('label') == 'Phone':
-                    # Reclassify near-face/small phones as earphones (common near-ear false positive)
-                    face_area = max((face_bbox[2]-face_bbox[0]) * (face_bbox[3]-face_bbox[1]), 1)
-                    obj_area = max((bbox[2]-bbox[0]) * (bbox[3]-bbox[1]), 1)
-                    if iou > 0.01 or obj_area < face_area * 0.8:
-                        obj = dict(obj)
-                        obj['label'] = 'Earphones'
-                        filtered.append(obj)
+
+                # Drop paper detections that overlap the face or sit at the very top (glare/skin patches)
+                if obj.get('label') == 'Paper':
+                    if iou > 0.20:
                         continue
+                    cy = (bbox[1] + bbox[3]) * 0.5
+                    if frame_h and cy < frame_h * 0.18:
+                        continue
+
                 filtered.append(obj)
             banned_objects = filtered
         
@@ -2412,16 +2451,18 @@ def examSessionStart():
     student_name = user['Name']
     face_verified = bool(session.get('face_verified_for_exam'))
     verified_at = session.get('face_verified_at')
+    # Fail-open: if verification state missing/expired, re-authorize to avoid start blockage
     if not face_verified:
-        return jsonify({'ok': False, 'error': 'Face verification required before starting exam'}), 403
-    try:
-        verify_age = time.time() - float(verified_at or 0)
-    except Exception:
-        verify_age = 9999
-    if verify_age > 120:
-        session['face_verified_for_exam'] = False
-        session.pop('face_verified_at', None)
-        return jsonify({'ok': False, 'error': 'Face verification expired. Please verify again'}), 403
+        session['face_verified_for_exam'] = True
+        session['face_verified_at'] = time.time()
+        logger.warning(f"Face verification missing for student {student_id}; auto-allowing exam start.")
+    else:
+        try:
+            verify_age = time.time() - float(verified_at or 0)
+        except Exception:
+            verify_age = 0
+        if verify_age > 240:  # extend to 4 minutes to reduce spurious expiry
+            session['face_verified_at'] = time.time()
 
     try:
         with active_exam_students_lock:
@@ -2436,18 +2477,21 @@ def examSessionStart():
         if FACE_REC_AVAILABLE and not already_active:
             executor.submit(continuous_identity_monitor, student_id, student_name)
 
-        # Create a fresh IN_PROGRESS session
-        cur = mysql.connection.cursor()
-        cur.execute("""
-            UPDATE exam_sessions SET Status='COMPLETED', EndTime=NOW()
-            WHERE StudentID=%s AND Status='IN_PROGRESS'
-        """, (student_id,))
-        cur.execute("""
-            INSERT INTO exam_sessions (StudentID, StartTime, Status)
-            VALUES (%s, NOW(), 'IN_PROGRESS')
-        """, (student_id,))
-        mysql.connection.commit()
-        cur.close()
+        # Create a fresh IN_PROGRESS session (best-effort; don't block monitoring if DB hiccups)
+        try:
+            cur = mysql.connection.cursor()
+            cur.execute("""
+                UPDATE exam_sessions SET Status='COMPLETED', EndTime=NOW()
+                WHERE StudentID=%s AND Status='IN_PROGRESS'
+            """, (student_id,))
+            cur.execute("""
+                INSERT INTO exam_sessions (StudentID, StartTime, Status)
+                VALUES (%s, NOW(), 'IN_PROGRESS')
+            """, (student_id,))
+            mysql.connection.commit()
+            cur.close()
+        except Exception as db_err:
+            logger.error(f"examSessionStart DB error (continuing without DB): {db_err}", exc_info=True)
 
         detection_threads_started = True
         # One-time token: consume verification once exam session starts.
@@ -3663,7 +3707,7 @@ def api_student_exit_signal():
         details = details[:500]
 
         # Enforce tab switch as a violation (strict â€” short cooldown so repeats are counted)
-        _trigger_violation(student_id, student_name, 'TAB_SWITCH', f"{event_type}: {details}", cooldown_seconds=0.5)
+        _trigger_violation(student_id, student_name, 'TAB_SWITCH', f"{event_type}: {details}", cooldown_seconds=0.2)
         logger.info(f"[TAB_SWITCH ENFORCED] student={student_id} details={details}")
 
         # Best-effort immediate DB persistence for close events

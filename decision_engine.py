@@ -1,6 +1,7 @@
 import time
 import config_vision as config
 import threading
+import time  # used for debounced warning timing
 
 class DecisionEngine:
     def __init__(self):
@@ -13,7 +14,8 @@ class DecisionEngine:
                 self.student_states[sid] = {
                     "warning_count": 0,
                     "last_warning_time": 0.0,
-                    "condition_start": {}
+                    "condition_start": {},
+                    "frame_streaks": {}  # condition_name -> consecutive frames active
                 }
             return self.student_states[sid]
 
@@ -22,7 +24,8 @@ class DecisionEngine:
             self.student_states[str(sid)] = {
                 "warning_count": 0,
                 "last_warning_time": 0.0,
-                "condition_start": {}
+                "condition_start": {},
+                "frame_streaks": {}
             }
 
     def _check_condition(self, state, condition_name, is_active, required_time, current_time):
@@ -34,6 +37,22 @@ class DecisionEngine:
         else:
             if condition_name in state["condition_start"]:
                 del state["condition_start"][condition_name]
+        return False
+
+    def _check_condition_frames(self, state, condition_name, is_active, required_frames):
+        """
+        Frame-based debouncing. Returns True once the condition has been active
+        for the requested consecutive frame count.
+        """
+        streaks = state.setdefault("frame_streaks", {})
+        current = streaks.get(condition_name, 0)
+        if is_active:
+            current += 1
+            streaks[condition_name] = current
+            if current >= required_frames:
+                return True
+        else:
+            streaks[condition_name] = 0
         return False
 
     def evaluate(self, sid, face_detected, person_count, yaw_angle, ear, iris_offset_ratio, banned_objects):
@@ -69,7 +88,8 @@ class DecisionEngine:
 
         # Rule 2 - Prohibited object detection
         has_banned_object = bool(banned_objects)
-        if self._check_condition(state, "banned_object", has_banned_object, config.TIME_BANNED_OBJECT, current_time):
+        # Require consecutive frames with a prohibited object to reduce flicker/shadows
+        if self._check_condition_frames(state, "banned_object", has_banned_object, getattr(config, "BANNED_FRAMES_REQUIRED", 12)):
             labels = ", ".join(sorted({str(obj.get("label", "Object")) for obj in banned_objects})) or "Object"
             active_alerts.append(f"Prohibited object detected: {labels}")
 

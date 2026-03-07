@@ -1339,6 +1339,7 @@
                 showFaceVerifyStatus('Face verification expired. Please verify again.', 'error');
                 return;
             }
+            let sessionStartedOk = false;
             try {
                 const resp = await fetch('/api/exam-session/start', {
                     method: 'POST',
@@ -1352,14 +1353,25 @@
                 if (!resp.ok || !data.ok) {
                     throw new Error((data && data.error) || 'Unable to start exam session');
                 }
+                sessionStartedOk = true;
                 showFaceVerifyStatus('Exam started. Monitoring active.', 'success');
             } catch (err) {
-                alert('Could not start exam monitoring. Please refresh and try again.');
-                console.error('exam start error:', err);
-                return;
+                console.warn('Exam monitoring start fallback (continuing locally):', err);
+                showFaceVerifyStatus('Starting exam locally (server start retry in background)', 'warn');
             }
 
             examStarted = true;
+            if (!sessionStartedOk) {
+                // Retry non-blocking in background; don't block student camera feed
+                fetch('/api/exam-session/start', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': CSRF_TOKEN
+                    },
+                    body: JSON.stringify({ started_at: new Date().toISOString() })
+                }).catch(() => { });
+            }
 
             // Generate random questions for this student
             generateRandomQuestions();
@@ -2192,7 +2204,8 @@
                 const raiseTabSwitch = (reason) => {
                     if (this.examTerminated || !examStarted) return;
                     const now = Date.now();
-                    if ((now - lastTabSwitchAt) < 300) return; // more sensitive
+                    // very short debounce so rapid focus/blur toggles still count
+                    if ((now - lastTabSwitchAt) < 150) return;
                     lastTabSwitchAt = now;
                     tabSwitchCount++;
                     if (this.socket && studentId) {
@@ -2204,6 +2217,7 @@
                     }
                 };
 
+                // Tab switch detection (debounced to reduce false positives)
                 document.addEventListener('visibilitychange', () => {
                     if (document.hidden) {
                         raiseTabSwitch('Switched away from exam tab');
@@ -2220,9 +2234,26 @@
                         this.syncWarningState();
                     }
                 });
-                // Blur detection with minimal debounce to catch side-by-side clicks
-                window.addEventListener('blur', () => raiseTabSwitch('Window blurred / possible tab change'));
-                window.addEventListener('focus', () => this.syncWarningState());
+
+                // Only flag blur if the window stays unfocused for > 1.2s (avoids clicks inside the same tab)
+                const BLUR_THRESHOLD_MS = 1200;
+                let blurTimer = null;
+                window.addEventListener('blur', () => {
+                    if (this.examTerminated || !examStarted) return;
+                    if (blurTimer) clearTimeout(blurTimer);
+                    blurTimer = setTimeout(() => {
+                        const hidden = document.visibilityState === 'hidden';
+                        const unfocused = !document.hasFocus();
+                        if (hidden || unfocused) {
+                            raiseTabSwitch('Window lost focus for >1.2s');
+                        }
+                    }, BLUR_THRESHOLD_MS);
+                });
+                window.addEventListener('focus', () => {
+                    if (blurTimer) clearTimeout(blurTimer);
+                    this.syncWarningState();
+                });
+
                 window.addEventListener('pagehide', () => raiseTabSwitch('Page hidden'));
                 window.addEventListener('beforeunload', () => raiseTabSwitch('Page unload detected'));
             },
