@@ -617,10 +617,16 @@ except Exception as e:
     class AdminMonitor: 
         def start_monitoring(self, *args, **kwargs): pass
         def stop_monitoring(self, *args, **kwargs): pass
-    class WarningSystem: 
+    class WarningSystem:
+        def __init__(self, *args, **kwargs):
+            self.warnings = {}
+            self.student_names = {}
+            self.max_warnings = 3
+            self.lock = threading.Lock()
         def initialize_student(self, *args, **kwargs): pass
         def add_warning(self, *args, **kwargs): return False
     class TabSwitchDetector: 
+        def __init__(self, *args, **kwargs): pass
         def initialize_student(self, *args, **kwargs): pass
         def detect_tab_switch(self, *args, **kwargs): return {'terminated': False, 'count': 0}
     class CameraSimulator:
@@ -662,7 +668,7 @@ CAMERA_BLOCKED_SECONDS = 1.5                 # seconds of dark frame before CAME
 FAST_FACE_ONLY_MODE = (os.getenv('FAST_FACE_ONLY_MODE', '0') == '1')
 RUN_POSE_ANALYSIS = (os.getenv('RUN_POSE_ANALYSIS', '1') == '1')
 OBJECT_ANALYSIS_INTERVAL_SEC = float(os.getenv('OBJECT_ANALYSIS_INTERVAL_SEC', '0.10'))
-OBJECT_CONSEC_FRAMES = int(os.getenv('OBJECT_CONSEC_FRAMES', '1'))
+OBJECT_CONSEC_FRAMES = int(os.getenv('OBJECT_CONSEC_FRAMES', '3'))
 
 logger.info(
     f"Detection config: fast_face_only={FAST_FACE_ONLY_MODE}, "
@@ -672,6 +678,13 @@ logger.info(
 
 def _record_runtime_warning(student_id, student_name, violation_type, details):
     sid = str(student_id)
+    if warning_system is None:
+        # If the warning system isn't ready, avoid client-side auto-terminate by keeping count at 0.
+        return 0, {
+            'type': str(violation_type or 'UNKNOWN').upper(),
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'details': str(details or '').strip()
+        }
     with runtime_warning_state_lock:
         rec = runtime_warning_state.setdefault(sid, {
             'warnings': 0,
@@ -1095,6 +1108,16 @@ def _trigger_violation(student_id, student_name, violation_type, details, cooldo
     now = time.time()
     vtype = str(violation_type or '').strip().upper()
 
+    # Ensure warning system is always available even if monitoring init failed
+    global warning_system, admin_monitor, tab_detector
+    if warning_system is None:
+        try:
+            warning_system = WarningSystem(socketio, admin_monitor)
+            tab_detector = TabSwitchDetector(warning_system, threshold=int(os.getenv('TAB_SWITCH_WARNING_THRESHOLD', '1')))
+            warning_system.max_warnings = 3
+        except Exception as ensure_err:
+            logger.error(f"[WARNING_INIT_FAIL] unable to bootstrap warning system: {ensure_err}")
+
     with student_detection_state_lock:
         if sid not in student_detection_state:
             student_detection_state[sid] = {
@@ -1186,14 +1209,37 @@ def _persist_object_violation(student_id, student_name, label, confidence):
     norm_label = _normalize_label(label)
     if not _label_is_prohibited(norm_label):
         return False
+    try:
+        conf_val = float(confidence or 0.0)
+    except Exception:
+        conf_val = 0.0
+    if conf_val < OBJECT_MIN_CONFIDENCE:
+        return False
+
+    # Require consecutive hits to reduce single-frame false positives (books/papers)
+    consecutive_needed = max(int(os.getenv('OBJECT_CONSEC_FRAMES', OBJECT_CONSEC_FRAMES)), 2)
+    now = time.time()
+    with student_detection_state_lock:
+        state = student_detection_state.setdefault(sid, {})
+        hits = state.setdefault('object_consecutive', {})
+        last_ts, count = hits.get(norm_label, (0.0, 0))
+        if now - last_ts > 2.5:
+            count = 0
+        count += 1
+        hits[norm_label] = (now, count)
+        if count < consecutive_needed:
+            return False
+        # reset counter after firing to prevent rapid double-counting
+        hits[norm_label] = (now, 0)
+
     details = f"Detected prohibited object: {norm_label} ({confidence:.2f})"
-    logger.info(f"[object_violation] student={sid} label={norm_label} conf={confidence:.2f}")
+    logger.info(f"[object_violation] student={sid} label={norm_label} conf={confidence:.2f} consecutive={consecutive_needed}")
     return _trigger_violation(
         sid,
         student_name,
         'PROHIBITED_OBJECT',
         details,
-        cooldown_seconds=float(OBJECT_VIOLATION_COOLDOWN_SEC)
+        cooldown_seconds=float(max(OBJECT_VIOLATION_COOLDOWN_SEC, 4.0))
     )
 
 
@@ -1356,6 +1402,11 @@ def _detect_phone_like_contours(frame):
     except Exception:
         return []
 
+# Object detection tuning (can be overridden via env vars)
+OBJECT_MIN_CONFIDENCE = float(os.getenv('OBJECT_MIN_CONFIDENCE', '0.60'))
+OBJECT_MIN_AREA_RATIO = float(os.getenv('OBJECT_MIN_AREA_RATIO', '0.005'))   # >=0.5% of frame
+OBJECT_MAX_AREA_RATIO = float(os.getenv('OBJECT_MAX_AREA_RATIO', '0.25'))   # <=25% of frame (ignore whole-wall boxes)
+
 def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
     """
     Detect prohibited objects using YOLOv8.
@@ -1421,6 +1472,12 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                         y2 = max(0, min(int(xyxy[3]), h))
                         bw = max(1, x2 - x1)
                         bh = max(1, y2 - y1)
+
+                        if score < OBJECT_MIN_CONFIDENCE:
+                            continue
+                        area_ratio = float(bw * bh) / float(max(1, w * h))
+                        if area_ratio < OBJECT_MIN_AREA_RATIO or area_ratio > OBJECT_MAX_AREA_RATIO:
+                            continue
 
                         detections.append({
                             'label': label,
@@ -3972,11 +4029,11 @@ if MONITORING_ENABLED and socketio:
     def handle_prohibited_action(data):
         student_id = str(data.get('student_id'))
         action = data.get('action')
-        if warning_system and student_id:
-            terminated = warning_system.add_warning(student_id, 'PROHIBITED_SHORTCUT', action, emit_to_student=True)
+        if student_id:
+            terminated = _trigger_violation(student_id, data.get('student_name') or 'Unknown', 'PROHIBITED_SHORTCUT', str(action))
+            logger.info(f"[SHORTCUT] student={student_id} action={action} terminated={terminated}")
             if terminated:
                 emit('auto_terminated', {'student_id': student_id})
-            logger.info(f"[SHORTCUT] student={student_id} action={action} terminated={terminated}")
         else:
             logger.info(f"[SHORTCUT IGNORED] student={student_id} action={action}")
 
@@ -3986,7 +4043,7 @@ if MONITORING_ENABLED and socketio:
         student_name = str(data.get('student_name') or (current_user() or {}).get('Name') or 'Unknown')
         details = str(data.get('details') or 'Tab switch detected').strip()
         if student_id:
-            terminated = warning_system.add_warning(student_id, 'TAB_SWITCH', details)
+            terminated = _trigger_violation(student_id, student_name, 'TAB_SWITCH', details, cooldown_seconds=0.5)
             logger.info(f"[TAB_SWITCH] student={student_id} details={details} terminated={terminated}")
         else:
             logger.info(f"[TAB_SWITCH IGNORED] missing student_id details={details}")

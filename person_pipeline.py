@@ -5,6 +5,12 @@ import re
 
 # Initialize heavily loaded model globally, once
 _global_yolo_model = YOLO(config.YOLO_MODEL_NAME)
+# Warm up once to avoid first-inference stall during exam start
+try:
+    import numpy as _np
+    _ = _global_yolo_model(_np.zeros((320, 320, 3), dtype=_np.uint8), verbose=False)
+except Exception:
+    pass
 _yolo_lock = threading.Lock()
 
 class PersonDetector:

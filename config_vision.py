@@ -14,7 +14,7 @@ YOLO_BANNED_CLASSES = [
 ]
 YOLO_PERSON_CLASS = 0
 YOLO_PERSON_CONFIDENCE = 0.55
-YOLO_BANNED_CONFIDENCE = 0.18
+YOLO_BANNED_CONFIDENCE = 0.35
 # Person box sanity bounds (ratios relative to frame) to keep small / partial people
 PERSON_MIN_AREA_RATIO = 0.01
 PERSON_MAX_AREA_RATIO = 0.95

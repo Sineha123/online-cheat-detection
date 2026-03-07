@@ -538,7 +538,8 @@ class ViolationAutoSaver:
             return None
 
 
-# ============================================================================class AdminMonitor:
+# ============================================================================
+class AdminMonitor:
     """Enhanced admin monitoring with automatic streaming on exam start"""
     
     def __init__(self, socketio_instance, fps=5, warning_system=None):
@@ -1273,7 +1274,6 @@ print("    ✓ Auto-terminate after 3 warnings")
 print("    ✓ Audio Monitoring")
 print("    ✓ Auto-Save Violations (Video + JSON)")
 print("=" * 70)
-
 
 
 
