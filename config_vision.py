@@ -22,12 +22,12 @@ PERSON_MIN_ASPECT = 0.20   # width / height
 PERSON_MAX_ASPECT = 1.35
 
 # Paper detection (heuristic)
-PAPER_MIN_AREA_RATIO = 0.01   # >=1% of frame
-PAPER_MAX_AREA_RATIO = 0.70
-PAPER_MIN_ASPECT = 0.35
-PAPER_MAX_ASPECT = 2.2
-PAPER_BRIGHT_THRESH = 180   # grayscale threshold (lowered)
-PAPER_EDGE_DENSITY = 0.045  # fallback edge-density threshold
+PAPER_MIN_AREA_RATIO = 0.003   # >=0.3% of frame (captures small/angled sheets)
+PAPER_MAX_AREA_RATIO = 0.85
+PAPER_MIN_ASPECT = 0.20        # allow tall/narrow edge-on sheets
+PAPER_MAX_ASPECT = 3.0
+PAPER_BRIGHT_THRESH = 170      # grayscale/L-channel threshold (more tolerant)
+PAPER_EDGE_DENSITY = 0.030     # fallback edge-density threshold (more sensitive)
 
 # Head Pose / Yaw Thresholds
 YAW_THRESHOLD_DEG = 25.0

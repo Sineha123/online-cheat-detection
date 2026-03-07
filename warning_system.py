@@ -3,6 +3,7 @@ Warning System Module
 Handles student warnings and exam termination
 """
 
+import os
 import threading
 import sys
 import time
@@ -21,7 +22,9 @@ class WarningSystem:
         self.socketio = socketio_instance
         self.admin_monitor = admin_monitor
         self.max_warnings = max_warnings
-        self.auto_terminate = False  # Default OFF — admin must explicitly enable
+        auto_env = os.getenv('AUTO_TERMINATE_DEFAULT', '1')
+        # Default ON so the 3rd warning is shown then termination occurs after 3 seconds.
+        self.auto_terminate = str(auto_env).strip() not in ('0', 'false', 'False')
         self.lock = threading.Lock()
         self.warnings = {}  # student_id -> count
         self.violations = {}  # student_id -> list of violations

@@ -2241,19 +2241,35 @@
                     }
                 });
 
+                const emitShortcut = (action) => {
+                    if (this.socket && studentId) {
+                        this.socket.emit('prohibited_action', {
+                            student_id: studentId,
+                            student_name: studentName,
+                            action
+                        });
+                    }
+                };
+
                 document.addEventListener('keydown', (e) => {
                     if (!this.examTerminated && examStarted) {
                         if (e.key === 'F12') {
                             e.preventDefault();
-                            this.addWarning({ type: 'DEVTOOLS_OPEN', details: 'F12 pressed', severity: 'high', student_id: studentId });
+                            const details = 'F12 pressed';
+                            this.addWarning({ type: 'DEVTOOLS_OPEN', details, severity: 'high', student_id: studentId });
+                            emitShortcut(details);
                         }
                         if (e.ctrlKey && e.shiftKey && ['I', 'C', 'J'].includes(e.key)) {
                             e.preventDefault();
-                            this.addWarning({ type: 'DEVTOOLS_SHORTCUT', details: `Ctrl+Shift+${e.key} pressed`, severity: 'high', student_id: studentId });
+                            const details = `Ctrl+Shift+${e.key} pressed`;
+                            this.addWarning({ type: 'DEVTOOLS_SHORTCUT', details, severity: 'high', student_id: studentId });
+                            emitShortcut(details);
                         }
                         if ((e.ctrlKey || e.metaKey) && ['u', 'U', 's', 'S', 'p', 'P'].includes(e.key)) {
                             e.preventDefault();
-                            this.addWarning({ type: 'KEYBOARD_SHORTCUT', details: `Ctrl+${e.key.toUpperCase()} pressed`, severity: 'medium', student_id: studentId });
+                            const details = `Ctrl+${e.key.toUpperCase()} pressed`;
+                            this.addWarning({ type: 'KEYBOARD_SHORTCUT', details, severity: 'medium', student_id: studentId });
+                            emitShortcut(details);
                         }
                     }
                 });
@@ -2262,7 +2278,9 @@
                     document.addEventListener(event, (e) => {
                         if (!this.examTerminated && examStarted) {
                             e.preventDefault();
-                            this.addWarning({ type: event.toUpperCase(), details: `${event} attempted`, severity: 'medium', student_id: studentId });
+                            const details = `${event} attempted`;
+                            this.addWarning({ type: event.toUpperCase(), details, severity: 'medium', student_id: studentId });
+                            emitShortcut(details);
                         }
                     });
                 });

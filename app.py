@@ -1504,14 +1504,14 @@ def _student_frame_staleness_watchdog():
                     except Exception:
                         pass
 
-                # Camera staleness violation disabled per user request
-                # _persist_behavior_violation(
-                #     sid_str,
-                #     name,
-                #     "CAMERA_OFF",
-                #     f"Student camera/frame feed stale for {stale_for:.1f}s"
-                # )
-                logger.info(f"[CAMERA_OFF IGNORED] student={sid_str} stale_for={stale_for:.1f}s")
+                # Raise a server-side warning when camera feed stalls for 4.5s+
+                _persist_behavior_violation(
+                    sid_str,
+                    name,
+                    "CAMERA_OFF",
+                    f"Student camera/frame feed stale for {stale_for:.1f}s"
+                )
+                logger.info(f"[CAMERA_OFF] student={sid_str} stale_for={stale_for:.1f}s")
         except Exception as e:
             logger.warning(f"frame staleness watchdog error: {e}")
         time.sleep(1.0)
@@ -3605,9 +3605,9 @@ def api_student_exit_signal():
         details = (request.form.get('details') or request.args.get('details') or 'Tab/window closed during exam').strip()
         details = details[:500]
 
-        # Tab switch violations disabled per user request
-        # _trigger_violation(student_id, student_name, 'TAB_SWITCH', f"{event_type}: {details}", cooldown_seconds=1.0)
-        logger.info(f"[TAB_SWITCH IGNORED] student={student_id} details={details}")
+        # Enforce tab switch as a violation (strict â€” short cooldown so repeats are counted)
+        _trigger_violation(student_id, student_name, 'TAB_SWITCH', f"{event_type}: {details}", cooldown_seconds=0.5)
+        logger.info(f"[TAB_SWITCH ENFORCED] student={student_id} details={details}")
 
         # Best-effort immediate DB persistence for close events
         try:
@@ -3972,12 +3972,13 @@ if MONITORING_ENABLED and socketio:
     def handle_prohibited_action(data):
         student_id = str(data.get('student_id'))
         action = data.get('action')
-        # Keyboard shortcut violations disabled per user request
-        # if warning_system and student_id:
-        #     terminated = warning_system.add_warning(student_id, 'PROHIBITED_SHORTCUT', action, emit_to_student=False)
-        #     if terminated:
-        #         emit('auto_terminated', {'student_id': student_id})
-        logger.info(f"[SHORTCUT IGNORED] student={student_id} action={action}")
+        if warning_system and student_id:
+            terminated = warning_system.add_warning(student_id, 'PROHIBITED_SHORTCUT', action, emit_to_student=True)
+            if terminated:
+                emit('auto_terminated', {'student_id': student_id})
+            logger.info(f"[SHORTCUT] student={student_id} action={action} terminated={terminated}")
+        else:
+            logger.info(f"[SHORTCUT IGNORED] student={student_id} action={action}")
 
     @socketio.on('tab_switch_detected', namespace='/student')
     def handle_tab_switch(data):

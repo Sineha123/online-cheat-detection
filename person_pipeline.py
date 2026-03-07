@@ -11,12 +11,12 @@ class PersonDetector:
     def __init__(self):
         self.class_names = getattr(_global_yolo_model, 'names', {}) or {}
         self.selective_label_map = {
-            # Phones (already implemented, keep as-is)
-            'cellphone': 'Phone',
-            'cell phone': 'Phone',
-            'mobile phone': 'Phone',
-            'smartphone': 'Phone',
-            'phone': 'Phone',
+            # Phones â†’ treat as generic electronic device
+            'cellphone': 'Electronic Device',
+            'cell phone': 'Electronic Device',
+            'mobile phone': 'Electronic Device',
+            'smartphone': 'Electronic Device',
+            'phone': 'Electronic Device',
             # Cameras
             'camera': 'Camera',
             'webcam': 'Camera',
@@ -27,17 +27,17 @@ class PersonDetector:
             'paper': 'Book',
             'document': 'Book',
             # Headphones / earphones
-            'headphone': 'Earphones',
-            'headphones': 'Earphones',
-            'headset': 'Earphones',
-            'handsfree': 'Earphones',
-            'hands free': 'Earphones',
-            'head free': 'Earphones',
-            'earphone': 'Earphones',
-            'earphones': 'Earphones',
-            'earbud': 'Earphones',
-            'earbuds': 'Earphones',
-            'airpods': 'Earphones'
+            'headphone': 'Electronic Device',
+            'headphones': 'Electronic Device',
+            'headset': 'Electronic Device',
+            'handsfree': 'Electronic Device',
+            'hands free': 'Electronic Device',
+            'head free': 'Electronic Device',
+            'earphone': 'Electronic Device',
+            'earphones': 'Electronic Device',
+            'earbud': 'Electronic Device',
+            'earbuds': 'Electronic Device',
+            'airpods': 'Electronic Device'
         }
 
     def _normalize_label(self, label):
@@ -101,36 +101,85 @@ class PersonDetector:
                         "bbox": bbox
                     })
 
-        # Heuristic paper detection (large bright rectangle)
+        # Heuristic paper detection (large bright rectangle + edge density)
         try:
             import cv2
+
+            def _bbox_iou(a, b):
+                ax1, ay1, ax2, ay2, _ = a
+                bx1, by1, bx2, by2, _ = b
+                inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
+                inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
+                if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                    return 0.0
+                inter = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                area_a = (ax2 - ax1) * (ay2 - ay1)
+                area_b = (bx2 - bx1) * (by2 - by1)
+                denom = float(area_a + area_b - inter) or 1.0
+                return inter / denom
+
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            _, mask = cv2.threshold(gray, getattr(config, "PAPER_BRIGHT_THRESH", 180), 255, cv2.THRESH_BINARY)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l_channel = lab[:, :, 0]
+
+            bright_thresh = getattr(config, "PAPER_BRIGHT_THRESH", 170)
+            # Combine brightness mask + edges to catch bright or low-texture paper
+            _, bright_mask = cv2.threshold(l_channel, bright_thresh, 255, cv2.THRESH_BINARY)
+            blur = cv2.GaussianBlur(bright_mask, (5, 5), 0)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            closed = cv2.morphologyEx(blur, cv2.MORPH_CLOSE, kernel, iterations=2)
+            edges = cv2.Canny(closed, 40, 120)
+            combined = cv2.bitwise_or(closed, edges)
+
+            contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for cnt in contours:
                 area = cv2.contourArea(cnt)
                 if area <= 1:
                     continue
                 area_ratio = area / frame_area
-                if area_ratio < getattr(config, "PAPER_MIN_AREA_RATIO", 0.01) or area_ratio > getattr(config, "PAPER_MAX_AREA_RATIO", 0.70):
+                if area_ratio < getattr(config, "PAPER_MIN_AREA_RATIO", 0.003) or area_ratio > getattr(config, "PAPER_MAX_AREA_RATIO", 0.85):
                     continue
+
+                rect = cv2.minAreaRect(cnt)
+                (cw, ch) = rect[1]
+                if cw == 0 or ch == 0:
+                    continue
+                aspect_rot = max(cw, ch) / max(min(cw, ch), 1)
+
                 x, y, ww, hh = cv2.boundingRect(cnt)
                 aspect = ww / max(hh, 1)
-                if aspect < getattr(config, "PAPER_MIN_ASPECT", 0.35) or aspect > getattr(config, "PAPER_MAX_ASPECT", 2.2):
+                min_aspect = getattr(config, "PAPER_MIN_ASPECT", 0.20)
+                max_aspect = getattr(config, "PAPER_MAX_ASPECT", 3.0)
+                if aspect < min_aspect and aspect_rot < min_aspect:
                     continue
-                bbox = (int(x), int(y), int(x + ww), int(y + hh), 0.35)
+                if aspect > max_aspect and aspect_rot > max_aspect:
+                    continue
+
+                # Require region to actually be bright to avoid walls/backgrounds
+                region_mean = 0.0
+                if hh > 0 and ww > 0:
+                    region_mean = cv2.mean(l_channel[y:y+hh, x:x+ww])[0]
+                if region_mean < (bright_thresh - 15):
+                    continue
+
+                bbox = (int(x), int(y), int(x + ww), int(y + hh), 0.55)
+                # Skip duplicates that overlap with an existing paper box
+                if any(_bbox_iou(bbox, existing) > 0.6 for existing in paper_candidates):
+                    continue
                 paper_candidates.append(bbox)
                 banned_objects.append({
                     "label": "Paper",
                     "bbox": bbox
                 })
-            # Edge density fallback for low-contrast paper
-            edges = cv2.Canny(gray, 60, 140)
-            density = float(cv2.countNonZero(edges)) / float(edges.size or 1)
-            if density > getattr(config, "PAPER_EDGE_DENSITY", 0.045):
+
+            # Edge density fallback for low-contrast paper filling most of the view
+            edges_lo = cv2.Canny(gray, 50, 130)
+            density = float(cv2.countNonZero(edges_lo)) / float(edges_lo.size or 1)
+            if density > getattr(config, "PAPER_EDGE_DENSITY", 0.030):
                 h2, w2 = gray.shape[:2]
-                bbox = (int(w2*0.05), int(h2*0.05), int(w2*0.95), int(h2*0.95), 0.3)
-                banned_objects.append({"label": "Paper", "bbox": bbox})
+                bbox = (int(w2 * 0.04), int(h2 * 0.04), int(w2 * 0.96), int(h2 * 0.96), 0.35)
+                if not any(_bbox_iou(bbox, existing) > 0.6 for existing in paper_candidates):
+                    banned_objects.append({"label": "Paper", "bbox": bbox})
         except Exception:
             pass
                 
