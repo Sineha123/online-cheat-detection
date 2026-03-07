@@ -3,13 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Live Monitoring Dashboard</title>
+    <title>Online CheatBuster - Admin Live Monitoring</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            overflow-x: hidden;
         }
 
         body {
@@ -63,6 +67,12 @@
         .nav-btn:hover {
             background: rgba(255,255,255,0.3);
             transform: translateY(-2px);
+        }
+
+        /* Responsive helpers */
+        img, video, canvas {
+            max-width: 100%;
+            height: auto;
         }
 
         .btn-logout {
@@ -594,18 +604,26 @@
                 studentsData[key] = {
                     student_id: key,
                     student_name: data.student_name || 'Unknown Student',
-                    warnings: data.total_warnings || 0,
+                    warnings: 0,
                     violations: [],
-                    startTime: Date.now(),
-                    lastFrame: null
+                    startTime: null,
+                    endTime: null,
+                    lastFrame: null,
+                    lastUpdate: null
                 };
             }
             
             studentsData[key].warnings = data.total_warnings || 0;
             studentsData[key].violations = studentsData[key].violations || [];
-            
+            studentsData[key].lastUpdate = Date.now();
+            if (!studentsData[key].startTime) {
+                studentsData[key].startTime = Date.now();
+            }
             if (data.violation) {
                 studentsData[key].violations.push(data.violation);
+            }
+            if (studentsData[key].warnings >= 3 && !studentsData[key].endTime) {
+                studentsData[key].endTime = Date.now();
             }
             
             totalWarnings++;
@@ -642,6 +660,7 @@
             terminatedExams++;
             
             if (studentsData[data.student_id]) {
+                studentsData[data.student_id].endTime = studentsData[data.student_id].endTime || Date.now();
                 showAlert(`❌ ${data.student_name}'s exam terminated: ${data.reason}`);
                 delete studentsData[data.student_id];
             }
@@ -711,6 +730,7 @@
                             studentsData[sid] = {
                                 ...student,
                                 startTime: Date.now(),
+                                endTime: null,
                                 lastUpdate: Date.now(),
                                 lastFrame: null
                             };
@@ -719,7 +739,8 @@
                                 ...studentsData[sid],
                                 ...student,
                                 startTime: studentsData[sid].startTime || Date.now(),
-                                lastUpdate: Date.now()
+                                lastUpdate: Date.now(),
+                                endTime: studentsData[sid].endTime || (student.warnings >=3 ? Date.now() : null)
                             };
                         }
                     });
@@ -760,8 +781,7 @@
             const warningLevel = Math.min(student.warnings || 0, 3);
             const warningClass = `warning-${warningLevel}`;
             
-            const hasStart = !!student.startTime;
-            const duration = hasStart ? Math.floor((Date.now() - student.startTime) / 1000) : 0;
+            const durationText = formatDuration(student);
             
             card.innerHTML = `
                 <div class="student-header ${warningClass}">
@@ -793,7 +813,7 @@
                     </div>
                     <div class="info-row">
                         <span class="info-label">Duration:</span>
-                        <span class="info-value">${hasStart ? formatDuration(duration) : '--'}</span>
+                        <span class="info-value">${durationText}</span>
                     </div>
                 </div>
                 ${student.violations && student.violations.length > 0 ? `
@@ -830,6 +850,9 @@
                 }
                 videoContainer.innerHTML = `<img class="live-feed" data-mode="mjpeg" src="/admin/live/${studentId}" alt="Live Feed">`;
             }
+            if (studentsData[studentId] && !studentsData[studentId].startTime) {
+                studentsData[studentId].startTime = Date.now();
+            }
         }
 
         function updateModalFrame(frameData) {
@@ -840,18 +863,16 @@
             }
         }
 
-        function formatDuration(seconds) {
+        function formatDuration(student) {
+            if (!student || !student.startTime) return '--';
+            const end = student.endTime || student.lastUpdate || Date.now();
+            const seconds = Math.max(0, Math.floor((end - student.startTime) / 1000));
             const hours = Math.floor(seconds / 3600);
             const mins = Math.floor((seconds % 3600) / 60);
             const secs = seconds % 60;
-            
-            if (hours > 0) {
-                return `${hours}h ${mins}m`;
-            } else if (mins > 0) {
-                return `${mins}m ${secs}s`;
-            } else {
-                return `${secs}s`;
-            }
+            if (hours > 0) return `${hours}h ${mins}m`;
+            if (mins > 0) return `${mins}m ${secs}s`;
+            return `${secs}s`;
         }
 
         function viewLiveFeed(studentId, studentName) {
@@ -940,8 +961,7 @@
             if (!studentsData[key] || !studentsData[key].startTime) return;
             const durationEl = card.querySelector('.info-row:last-child .info-value');
             if (durationEl) {
-                const secs = Math.floor((Date.now() - (studentsData[key].startTime || Date.now())) / 1000);
-                durationEl.textContent = formatDuration(Math.max(0, secs));
+                durationEl.textContent = formatDuration(studentsData[key]);
             }
         });
             updateDashboard(false);
@@ -966,20 +986,26 @@
                                 student_name: info.name || `Student ${key}`,
                                 warnings: 0,
                                 violations: [],
-                                startTime: Date.now(),
-                                lastFrame: null
+                                startTime: info.start_time || Date.now(),
+                                endTime: null,
+                                lastFrame: null,
+                                lastUpdate: Date.now()
                             };
                             changed = true;
                         }
+                        const stu = studentsData[key];
+                        stu.lastUpdate = Date.now();
+                        if (!stu.startTime) stu.startTime = info.start_time || Date.now();
                         // Update warnings count from server truth
-                        if (studentsData[key].warnings !== info.warnings) {
-                            studentsData[key].warnings = info.warnings;
+                        if (stu.warnings !== info.warnings) {
+                            stu.warnings = info.warnings;
                             totalWarnings = Math.max(totalWarnings, info.warnings);
+                            if (stu.warnings >= 3 && !stu.endTime) stu.endTime = Date.now();
                             changed = true;
                         }
                         // Merge violations
-                        if (info.violations && info.violations.length > (studentsData[key].violations || []).length) {
-                            studentsData[key].violations = info.violations;
+                        if (info.violations && info.violations.length > (stu.violations || []).length) {
+                            stu.violations = info.violations;
                             changed = true;
                         }
                     });

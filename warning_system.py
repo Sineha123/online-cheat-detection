@@ -28,27 +28,16 @@ class WarningSystem:
         self.student_names = {}  # student_id -> name
         self.last_warning_at = {}  # student_id -> epoch seconds
         self.last_warning_type_at = {}  # student_id -> {type: epoch seconds}
+        self.termination_timer = {}  # student_id -> Timer handle
 
         # Apply a minimum gap for ALL warning increments — 3.0 seconds only.
         self.global_gap_seconds = 3.0
-        self.type_gap_seconds = {
-            'NO_FACE': 5.0,
-            'MULTIPLE_FACES': 5.0,
-            'VOICE_DETECTED': 5.0,
-            'PROHIBITED_OBJECT': 5.0,
-            'TAB_SWITCH': 4.0,
-            'PROHIBITED_SHORTCUT': 4.0,
-            'HEAD_MOVEMENT': 5.0,
-            'DISTRACTION': 5.0,
-            'STUDENT_LEFT_SEAT': 5.0,
-            'EYES_CLOSED': 5.0,
-            'GAZE_LEFT': 5.0,
-            'GAZE_RIGHT': 5.0,
-            'GAZE_UP': 5.0,
-            'GAZE_DOWN': 5.0,
-            'IDENTITY_MISMATCH': 5.0,
-            'TERMINATED_BY_ADMIN': 0.0
-        }
+        self.type_gap_seconds = {k: 3.0 for k in [
+            'NO_FACE','MULTIPLE_FACES','VOICE_DETECTED','PROHIBITED_OBJECT','TAB_SWITCH',
+            'PROHIBITED_SHORTCUT','HEAD_MOVEMENT','DISTRACTION','STUDENT_LEFT_SEAT',
+            'EYES_CLOSED','GAZE_LEFT','GAZE_RIGHT','GAZE_UP','GAZE_DOWN','IDENTITY_MISMATCH'
+        ]}
+        self.type_gap_seconds['TERMINATED_BY_ADMIN'] = 0.0
 
     def set_auto_terminate(self, enabled: bool):
         with self.lock:
@@ -156,26 +145,31 @@ class WarningSystem:
                         'warnings': count
                     }, namespace='/admin')
                 return False
-                
-            reason = f"Reached {self.max_warnings} warnings for violations: {vtype}"
-            print(f"🚨 TERMINATING EXAM for student {student_id}: {reason}")
-            
-            if self.socketio:
-                # Notify admin
-                self.socketio.emit('student_exam_terminated', {
-                    'student_id': student_id,
-                    'student_name': student_name,
-                    'reason': reason
-                }, namespace='/admin')
-                
-                # Notify student
-                self.socketio.emit('exam_terminated', {
-                    'student_id': student_id,
-                    'reason': reason,
-                    'auto_terminated': True
-                }, namespace='/student')
-            
-            return True  # terminated
+            # Auto-terminate, but after a 3s grace so 3rd warning shows
+            def do_term():
+                reason = f"Reached {self.max_warnings} warnings for violations: {vtype}"
+                print(f"🚨 TERMINATING EXAM for student {student_id}: {reason}")
+                if self.socketio:
+                    self.socketio.emit('student_exam_terminated', {
+                        'student_id': student_id,
+                        'student_name': student_name,
+                        'reason': reason
+                    }, namespace='/admin')
+                    self.socketio.emit('exam_terminated', {
+                        'student_id': student_id,
+                        'reason': reason,
+                        'auto_terminated': True
+                    }, namespace='/student')
+            try:
+                if sid in self.termination_timer and self.termination_timer[sid]:
+                    self.termination_timer[sid].cancel()
+            except Exception:
+                pass
+            import threading
+            t = threading.Timer(3.0, do_term)
+            self.termination_timer[sid] = t
+            t.start()
+            return True  # termination scheduled
         
         return False
 

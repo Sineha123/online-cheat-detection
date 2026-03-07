@@ -43,15 +43,23 @@ class DecisionEngine:
         active_alerts = []
         state = self.get_state(sid)
         current_time = time.time()
+        iris_x = 0.0
+        iris_y = 0.0
+        if isinstance(iris_offset_ratio, (list, tuple)) and len(iris_offset_ratio) >= 2:
+            iris_x, iris_y = float(iris_offset_ratio[0]), float(iris_offset_ratio[1])
+        else:
+            iris_x = float(iris_offset_ratio or 0.0)
+            iris_y = 0.0
         
         # Rule 1 - No Face (ONLY Rule Active)
         if self._check_condition(state, "no_face", not face_detected, config.TIME_NO_FACE, current_time):
             active_alerts.append("Face not detected")
 
         # Rule 1b - Eyes / gaze off-screen
-        gaze_off = abs(iris_offset_ratio) > config.IRIS_OFFSET_THRESHOLD
+        # Only use horizontal gaze for now (disable up/down to avoid noise)
+        gaze_off = (abs(iris_x) > config.IRIS_OFFSET_THRESHOLD)
         if self._check_condition(state, "gaze_off", gaze_off, config.TIME_GAZING, current_time):
-            direction = "left" if iris_offset_ratio < 0 else "right"
+            direction = "left" if iris_x < 0 else "right"
             active_alerts.append(f"Gaze off screen ({direction})")
 
         # Rule 1c - Head turned away

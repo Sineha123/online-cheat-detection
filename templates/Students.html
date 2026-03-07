@@ -39,6 +39,12 @@
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: var(--gray-50);
             color: var(--gray-900);
+            overflow-x: hidden;
+        }
+
+        img, video, canvas {
+            max-width: 100%;
+            height: auto;
         }
 
         /* Enhanced Sidebar */
@@ -153,7 +159,7 @@
             .live-monitoring-btn { padding: 10px 16px; }
             .info-data { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
             .active-students-grid { grid-template-columns: 1fr; }
-            .table-responsive { overflow-x: auto; }
+            .table-responsive { overflow-x: hidden; }
         }
         @media (max-width: 640px) {
             .head-title h1 { font-size: 24px; }
@@ -524,9 +530,19 @@
             box-shadow: var(--shadow-lg);
         }
 
+        .modal-dialog {
+            max-width: min(900px, 95vw);
+            width: 95vw;
+        }
+
+        .modal-body {
+            overflow-x: hidden;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
+            table-layout: fixed;
         }
 
         table thead tr {
@@ -540,11 +556,46 @@
             font-weight: 600;
             font-size: 14px;
             text-transform: uppercase;
+            word-break: break-word;
         }
 
         table tbody td {
             padding: 20px 16px;
             border-bottom: 1px solid var(--gray-200);
+            word-break: break-word;
+        }
+
+        /* Mobile-friendly table: allow rows to breathe instead of squashing columns */
+        @media screen and (max-width: 992px) {
+            .table-responsive { overflow-x: auto; }
+            table { table-layout: auto; }
+            table thead { display: none; }
+            table tbody tr {
+                display: block;
+                margin-bottom: 14px;
+                padding: 14px;
+                border: 1px solid var(--gray-200);
+                border-radius: 12px;
+                box-shadow: var(--shadow-sm);
+                background: #fff;
+            }
+            table tbody td {
+                display: grid;
+                grid-template-columns: 120px 1fr;
+                align-items: center;
+                padding: 10px 0;
+                border: none;
+            }
+            table tbody td::before {
+                content: attr(data-label);
+                font-weight: 600;
+                color: var(--gray-700);
+                padding-right: 12px;
+            }
+            .action-buttons {
+                width: 100%;
+                justify-content: flex-start;
+            }
         }
 
         table tbody tr {
@@ -1158,8 +1209,8 @@
                             <tbody>
                                 {% for student in students %}
                                 <tr>
-                                    <td><strong>#{{ student.id }}</strong></td>
-                                    <td>
+                                    <td data-label="ID"><strong>#{{ student.id }}</strong></td>
+                                    <td data-label="Profile">
                                         {% if student.profile %}
                                         <a href="{{ url_for('static', filename='Profiles/' + student.profile) }}"
                                             target="_blank" class="profile-image-container"
@@ -1179,14 +1230,14 @@
                                         </div>
                                         {% endif %}
                                     </td>
-                                    <td>
+                                    <td data-label="Student Information">
                                         <div class="student-info-card">
                                             <div class="student-name">{{ student.name }}</div>
                                             <div class="student-email">{{ student.email }}</div>
                                             <div class="student-id">ID: {{ student.id }}</div>
                                         </div>
                                     </td>
-                                    <td>
+                                    <td data-label="Face Status">
                                         {% if student.profile %}
                                         <span class="status-badge status-registered">
                                             <i class='bx bxs-check-circle'></i> Registered
@@ -1197,7 +1248,7 @@
                                         </span>
                                         {% endif %}
                                     </td>
-                                    <td>
+                                    <td data-label="Actions">
                                         <div class="action-buttons">
                                             <!-- Register Face Button -->
                                             <button class="btn-action btn-register" data-toggle="modal"

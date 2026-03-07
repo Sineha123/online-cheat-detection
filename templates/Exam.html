@@ -1784,6 +1784,7 @@
             examTerminated: false,
             socket: null,
             violationLog: [],
+            pendingViolations: [],
             lastWarningAt: 0,
             warningTypeLastAt: {},
             recentViolationKeys: {},
@@ -1791,24 +1792,24 @@
             acknowledgeGraceUntil: 0,
             syncTimer: null,
             lastServerViolationSignature: '',
-            globalWarningGapMs: 4000,        // 4-second global gap
-            postAcknowledgeGraceMs: 4000,    // 4s pause after "I understand"
-            duplicateKeyWindowMs: 5000,
+            globalWarningGapMs: 3000,        // 3-second global gap
+            postAcknowledgeGraceMs: 3000,    // 3s pause after "I understand"
+            duplicateKeyWindowMs: 4000,
             typeCooldownsMs: {
-                'VOICE_DETECTED': 5000,
-                'MIC_OFF': 5000,
-                'CAMERA_OFF': 5000,
-                'CAMERA_BLOCKED': 5000,
-                'TAB_SWITCH': 4000,
-                'FULLSCREEN_EXIT': 4000,
-                'RIGHT_CLICK': 4000,
-                'COPY': 4000,
-                'PASTE': 4000,
-                'CUT': 4000,
-                'DEVTOOLS_OPEN': 5000,
-                'DEVTOOLS_OPENED': 5000,
-                'DEVTOOLS_SHORTCUT': 5000,
-                'KEYBOARD_SHORTCUT': 4000
+                'VOICE_DETECTED': 3000,
+                'MIC_OFF': 3000,
+                'CAMERA_OFF': 3000,
+                'CAMERA_BLOCKED': 3000,
+                'TAB_SWITCH': 3000,
+                'FULLSCREEN_EXIT': 3000,
+                'RIGHT_CLICK': 3000,
+                'COPY': 3000,
+                'PASTE': 3000,
+                'CUT': 3000,
+                'DEVTOOLS_OPEN': 3000,
+                'DEVTOOLS_OPENED': 3000,
+                'DEVTOOLS_SHORTCUT': 3000,
+                'KEYBOARD_SHORTCUT': 3000
             },
 
             init() {
@@ -1904,6 +1905,10 @@
 
             addWarning(violationData = {}) {
                 if (this.examTerminated || !examStarted) return;
+                if (this.warningModalOpen) {
+                    this.pendingViolations.push(violationData);
+                    return;
+                }
                 const now = Date.now();
                 const warningType = String(violationData.type || 'UNKNOWN').toUpperCase();
                 const warningDetails = String(violationData.details || '').trim();
@@ -1934,11 +1939,15 @@
 
                 if (typeof violationData.total_warnings === 'number') {
                     const serverWarnings = Math.min(violationData.total_warnings, MAX_WARNINGS);
-                    if (serverWarnings <= this.currentWarnings) return;
-                    this.currentWarnings = serverWarnings;
+                    const allowed = Math.min(serverWarnings, this.currentWarnings + 1);
+                    if (allowed <= this.currentWarnings) return;
+                    this.currentWarnings = allowed;
                     this.lastServerViolationSignature = `${serverWarnings}|${warningType}|${warningDetails}`;
                 } else {
-                    this.currentWarnings = Math.min(this.currentWarnings + 1, MAX_WARNINGS);
+                    // Optimistic local increment but only +1
+                    const allowed = this.currentWarnings + 1;
+                    if (allowed <= this.currentWarnings) return;
+                    this.currentWarnings = Math.min(allowed, MAX_WARNINGS);
                 }
 
                 this.lastWarningAt = now;
@@ -1956,15 +1965,6 @@
                 this.updateWarningBanner();
                 this.updateLiveWarningCount();
                 this.updateSecurityStatus();
-
-                // Immediately terminate locally on 3rd warning — don't wait for socket event.
-                if (this.currentWarnings >= MAX_WARNINGS) {
-                    setTimeout(() => {
-                        const reason = `Exam terminated — ${MAX_WARNINGS} warnings reached (${warningType})`;
-                        this.terminateExam(reason);
-                    }, 1500);
-                    return;
-                }
 
                 if (this.socket && studentId && violationData.source !== 'server') {
                     this.socket.emit('warning_issued', {
@@ -2020,6 +2020,17 @@
                 this.warningModalOpen = false;
                 this.acknowledgeGraceUntil = Date.now() + this.postAcknowledgeGraceMs;
                 window.focus();
+                // After grace, show next queued warning if any
+                if (this.pendingViolations.length > 0) {
+                    const next = this.pendingViolations.shift();
+                    setTimeout(() => this.addWarning(next), this.postAcknowledgeGraceMs);
+                } else if (this.currentWarnings >= MAX_WARNINGS) {
+                    // Show third warning, then terminate after gap
+                    setTimeout(() => {
+                        const reason = `Exam terminated — ${MAX_WARNINGS} warnings reached`;
+                        this.terminateExam(reason);
+                    }, this.postAcknowledgeGraceMs);
+                }
             },
 
             updateWarningBanner() {
@@ -2181,7 +2192,7 @@
                 const raiseTabSwitch = (reason) => {
                     if (this.examTerminated || !examStarted) return;
                     const now = Date.now();
-                    if ((now - lastTabSwitchAt) < 1500) return;
+                    if ((now - lastTabSwitchAt) < 300) return; // more sensitive
                     lastTabSwitchAt = now;
                     tabSwitchCount++;
                     if (this.socket && studentId) {
@@ -2209,7 +2220,8 @@
                         this.syncWarningState();
                     }
                 });
-                // Removed 'blur' event since it causes false positives on multi-monitor setups
+                // Blur detection with minimal debounce to catch side-by-side clicks
+                window.addEventListener('blur', () => raiseTabSwitch('Window blurred / possible tab change'));
                 window.addEventListener('focus', () => this.syncWarningState());
                 window.addEventListener('pagehide', () => raiseTabSwitch('Page hidden'));
                 window.addEventListener('beforeunload', () => raiseTabSwitch('Page unload detected'));
@@ -2972,6 +2984,10 @@
             window.startMonitoring = () => {
                 warningSystem.startFullscreenDetection();
             };
+            // Delay camera/detection start slightly (2s) to avoid premature warnings at exam load.
+            setTimeout(() => {
+                warningSystem.acknowledgeGraceUntil = Date.now() + 2000;
+            }, 0);
             // Prime camera access early so monitoring has a live track from start.
             setTimeout(async () => {
                 try {

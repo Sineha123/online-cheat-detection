@@ -992,7 +992,7 @@ def detect_people_opencv(frame):
         return 0
 
 def _image_has_single_face(image_bgr):
-    """Validate that image contains exactly one face (not zero, not multiple)."""
+    """Validate that image contains at least one visible face (relaxed for half/low-light faces)."""
     try:
         if image_bgr is None:
             return False
@@ -1000,9 +1000,9 @@ def _image_has_single_face(image_bgr):
         if FACE_REC_AVAILABLE:
             rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB) if CV2_AVAILABLE else image_bgr
             locs = face_recognition.face_locations(rgb)
-            return len(locs) == 1
+            return len(locs) >= 1
         faces = detect_faces(image_bgr)
-        return len(faces) == 1
+        return len(faces) >= 1
     except Exception:
         return False
 
@@ -1061,19 +1061,7 @@ def _overlay_status_snapshot(frame, snapshot, item=None):
     try:
         snap = snapshot or {}
         item = item or {}
-        y = 24
-        step = 24
-        lines = [
-            (f"Face: {'YES' if snap.get('face_detected') else 'NO'} Count: {int(snap.get('face_count') or 0)}", (0, 220, 0) if snap.get('face_detected') else (0, 0, 255)),
-            (f"Landmarks: {'ON' if snap.get('landmarks_detected') else 'OFF'} Occluded: {'YES' if snap.get('face_obscured') else 'NO'}", (0, 255, 255)),
-            (f"Gaze: {snap.get('gaze_direction') or 'CENTER'} EyesClosed: {float(snap.get('eyes_closed_elapsed') or 0.0):.1f}s", (255, 255, 0)),
-            (f"FaceLost: {float(snap.get('no_face_elapsed') or 0.0):.1f}s MultiFace: {float(snap.get('multi_face_elapsed') or 0.0):.1f}s", (0, 200, 255)),
-            (f"Objects: {', '.join((item.get('last_visible_object_labels') or [])[:3]) or 'none'}", (255, 255, 0)),
-            (f"Persons: {int(item.get('last_person_count') or 0)} Prohibited: {', '.join((item.get('last_prohibited_object_labels') or [])[:2]) or 'none'}", (0, 200, 255)),
-        ]
-        for text, color in lines:
-            cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-            y += step
+        # Minimal overlay only (per UX request) — no diagnostic text
         return frame
     except Exception:
         return frame
@@ -1598,13 +1586,13 @@ def _run_student_frame_detection(student_id, student_name, frame):
                 bbox = obj.get('bbox') or (0,0,0,0,0)
                 iou = bbox_iou(bbox, face_bbox)
                 if obj.get('label') == 'Phone':
-                    # Ignore phones overlapping the face (likely mistaken headset/ear)
-                    if iou > 0.1:
-                        # If hugging the ear, treat as earphones instead of phone
-                        if iou > 0.3:
-                            obj = dict(obj)
-                            obj['label'] = 'Earphones'
-                            filtered.append(obj)
+                    # Reclassify near-face/small phones as earphones (common near-ear false positive)
+                    face_area = max((face_bbox[2]-face_bbox[0]) * (face_bbox[3]-face_bbox[1]), 1)
+                    obj_area = max((bbox[2]-bbox[0]) * (bbox[3]-bbox[1]), 1)
+                    if iou > 0.01 or obj_area < face_area * 0.8:
+                        obj = dict(obj)
+                        obj['label'] = 'Earphones'
+                        filtered.append(obj)
                         continue
                 filtered.append(obj)
             banned_objects = filtered
@@ -1661,7 +1649,7 @@ def _run_student_frame_detection(student_id, student_name, frame):
             'eyes_closed_elapsed': 0.0,
             'looking_away': abs(yaw_angle) > config.YAW_THRESHOLD_DEG if face_detected else False,
             'looking_away_elapsed': 0.0,
-            'gaze_direction': "CENTER" if abs(iris_offset) < config.IRIS_OFFSET_THRESHOLD else "AWAY",
+            'gaze_direction': "CENTER" if (abs(iris_offset[0]) if isinstance(iris_offset, (list, tuple)) else abs(iris_offset)) < config.IRIS_OFFSET_THRESHOLD and (abs(iris_offset[1]) if isinstance(iris_offset, (list, tuple)) and len(iris_offset)>1 else 0) < config.IRIS_OFFSET_THRESHOLD else "AWAY",
             'no_face_elapsed': 0.0 if face_detected else 99.0,
             'multi_face_detected': person_count > 1,
             'multi_face_elapsed': 0.0,
@@ -2454,7 +2442,7 @@ def preExamFaceVerify():
         analyzer = FaceAnalyzer()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        face_detected, yaw_angle, ear, iris_offset_ratio, _ = analyzer.process_frame(rgb)
+        face_detected, yaw_angle, ear, iris_offsets, _ = analyzer.process_frame(rgb)
         
         if not face_detected:
             return jsonify({
@@ -3220,24 +3208,7 @@ def admin_live_stream(student_id):
                     else:
                         frame = _build_stream_placeholder(student_id, "Waiting for student camera...")
                 frame = _overlay_status_snapshot(frame, snapshot, overlay_item)
-                try:
-                    age_candidates = [ts for ts in [raw_ts, proc_ts] if ts and ts > 0.0]
-                    if age_candidates:
-                        newest_ts = max(age_candidates)
-                        stale_age = max(0.0, time.time() - newest_ts)
-                        if stale_age >= 1.0:
-                            stale_color = (0, 165, 255) if stale_age < 4.5 else (0, 0, 255)
-                            cv2.putText(
-                                frame,
-                                f"Feed Age: {stale_age:.1f}s",
-                                (10, max(24, frame.shape[0] - 18)),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.60,
-                                stale_color,
-                                2
-                            )
-                except Exception:
-                    pass
+                # Suppress feed-age/status text overlays for cleaner UI
                 last_stream_frame['frame'] = frame.copy()
                 ok, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
                 if not ok:
@@ -4013,10 +3984,11 @@ if MONITORING_ENABLED and socketio:
         student_id = str(data.get('student_id'))
         student_name = str(data.get('student_name') or (current_user() or {}).get('Name') or 'Unknown')
         details = str(data.get('details') or 'Tab switch detected').strip()
-        # Tab switch violations disabled per user request
-        # if student_id:
-        #     _trigger_violation(student_id, student_name, 'TAB_SWITCH', details, cooldown_seconds=1.0)
-        logger.info(f"[TAB_SWITCH IGNORED] student={student_id} details={details}")
+        if student_id:
+            terminated = warning_system.add_warning(student_id, 'TAB_SWITCH', details)
+            logger.info(f"[TAB_SWITCH] student={student_id} details={details} terminated={terminated}")
+        else:
+            logger.info(f"[TAB_SWITCH IGNORED] missing student_id details={details}")
 
     # --- ADMIN CONTROL ACTIONS ---
     @socketio.on('admin_clear_warnings', namespace='/admin')
@@ -4061,20 +4033,32 @@ if __name__ == '__main__':
         with app.app_context():
             ensure_db_schema()
 
-        if MONITORING_ENABLED:
-            # use socketio.run when monitoring enabled
-            socketio.run(
-                app,
-                debug=debug_mode,
-                use_reloader=False,  # Windows: avoid socket teardown race (WinError 10038)
-                host='0.0.0.0',
-                port=5001,
-                allow_unsafe_werkzeug=True
-            )
-        else:
-            logger.warning("Starting in BASIC MODE (No live monitoring)")
-            logger.info("To enable monitoring, install: pip install flask-socketio")
-            app.run(debug=debug_mode, use_reloader=False, host='0.0.0.0', port=5001, threaded=True)
+        auto_restart = (os.getenv('AUTO_RESTART', '1') == '1')
+        while True:
+            try:
+                if MONITORING_ENABLED:
+                    # use socketio.run when monitoring enabled
+                    socketio.run(
+                        app,
+                        debug=debug_mode,
+                        use_reloader=False,  # Windows: avoid socket teardown race (WinError 10038)
+                        host='0.0.0.0',
+                        port=5001,
+                        allow_unsafe_werkzeug=True
+                    )
+                else:
+                    logger.warning("Starting in BASIC MODE (No live monitoring)")
+                    logger.info("To enable monitoring, install: pip install flask-socketio")
+                    app.run(debug=debug_mode, use_reloader=False, host='0.0.0.0', port=5001, threaded=True)
+                break  # clean exit
+            except KeyboardInterrupt:
+                logger.info("Shutdown requested by user.")
+                break
+            except Exception as e:
+                logger.error(f"Fatal error launching app: {e}", exc_info=True)
+                if not auto_restart:
+                    break
+                logger.info("Auto-restart enabled. Restarting in 3 seconds...")
+                time.sleep(3)
     except Exception as e:
-        logger.error(f"Fatal error launching app: {e}")
-        traceback.print_exc()
+        logger.error(f"Fatal error launching app: {e}", exc_info=True)

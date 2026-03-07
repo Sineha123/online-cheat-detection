@@ -3,7 +3,7 @@ import config_vision as config
 
 class UILayer:
     @staticmethod
-    def draw_overlays(frame, warnings, penalty_score, bboxes, banned_objects, fps, landmarks=None, iris_offset=0.0):
+    def draw_overlays(frame, warnings, penalty_score, bboxes, banned_objects, fps, landmarks=None, iris_offset=(0.0, 0.0)):
         """
         Draws text, HUD, and warnings onto the shared frame buffer.
         """
@@ -65,10 +65,12 @@ class UILayer:
                     cv2.line(frame, (x1, cy), (x2, cy), (0, 255, 0), 1)
                     cv2.line(frame, (cx, y1), (cx, y2), (0, 255, 0), 1)
 
-                direction = 1 if iris_offset >= 0 else -1
-                magnitude = abs(iris_offset)
+                dx = iris_offset[0] if isinstance(iris_offset, (list, tuple)) else float(iris_offset or 0.0)
+                dy = 0.0  # disable vertical arrows to avoid false up/down
+                magnitude = abs(dx)
                 length = int(max(magnitude * config.GAZE_LINE_LENGTH, 20))
-                end_point = (eye_center[0] + direction * length, eye_center[1])
+                end_point = (eye_center[0] + int((1 if dx >=0 else -1) * length),
+                              eye_center[1])
 
                 color = config.COLOR_NORMAL
                 thickness = 2

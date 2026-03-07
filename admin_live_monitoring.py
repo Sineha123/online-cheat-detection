@@ -1098,30 +1098,9 @@ class ViolationAutoSaver:
                     
                     # 7. DRAW ANNOTATIONS
                     if CV2_AVAILABLE and frame is not None:
-                        # Student info overlay
-                        cv2.putText(frame, f"Student: {student_name}", (10, 30),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
-                        cv2.putText(frame, f"ID: {student_id}", (10, 58),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-                        
-                        # Face count
+                        # Minimal overlays: keep visual boxes/banners only (text HUD removed per UX request)
                         face_color = (0, 255, 0) if face_count == 1 else (0, 0, 255)
-                        cv2.putText(frame, f"Faces: {face_count}", (10, 85),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, face_color, 2)
-                        
-                        # Gaze
-                        gaze_color = (0, 255, 0) if gaze_direction == "Center" else (0, 165, 255)
-                        cv2.putText(frame, f"Gaze: {gaze_direction}", (10, 112),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, gaze_color, 2)
-                        
-                        if eyes_closed:
-                            cv2.putText(frame, "EYES CLOSED!", (10, 140),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
-                        
-                        if audio_violation:
-                            cv2.putText(frame, "SOUND DETECTED!", (10, 168),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
-                        
+
                         # Draw face rectangles
                         for face in faces:
                             f_color = (0, 255, 0) if face_count == 1 else (0, 0, 255)
@@ -1294,7 +1273,6 @@ print("    ✓ Auto-terminate after 3 warnings")
 print("    ✓ Audio Monitoring")
 print("    ✓ Auto-Save Violations (Video + JSON)")
 print("=" * 70)
-
 
 
 

@@ -7,7 +7,7 @@ _global_face_mesh = _mp_face_mesh.FaceMesh(
     static_image_mode=True, # Critical for threads processing disjointed frames
     max_num_faces=1,
     refine_landmarks=True, 
-    min_detection_confidence=0.3,  # Lowered to reduce false "no face" detections
+    min_detection_confidence=0.2,  # Lowered to reduce false "no face" detections and catch half faces
 )
 _face_lock = threading.Lock()
 
@@ -26,7 +26,7 @@ class FaceAnalyzer:
         face_detected = False
         yaw_angle = 0.0
         ear = 0.0
-        iris_offset_ratio = 0.0
+        iris_offset_ratio = (0.0, 0.0)  # (x, y)
         out_landmarks = []
         
         if results.multi_face_landmarks:
@@ -36,7 +36,7 @@ class FaceAnalyzer:
             
             yaw_angle = self._estimate_yaw(out_landmarks)
             ear = self._calculate_ear(out_landmarks)
-            iris_offset_ratio = self._calculate_iris_offset(out_landmarks)
+            iris_offset_ratio = self._calculate_iris_offsets(out_landmarks)
             
         return face_detected, yaw_angle, ear, iris_offset_ratio, out_landmarks
         
@@ -71,7 +71,7 @@ class FaceAnalyzer:
         
         return (ear_left + ear_right) / 2.0
 
-    def _calculate_iris_offset(self, landmarks):
+    def _calculate_iris_offsets(self, landmarks):
         left_iris = landmarks[468]
         right_iris = landmarks[473]
         
@@ -82,12 +82,18 @@ class FaceAnalyzer:
         right_outer = landmarks[263]
 
         left_eye_width = abs(left_inner.x - left_outer.x) + 1e-6
+        left_eye_height = abs(landmarks[159].y - landmarks[145].y) + 1e-6
         left_iris_pos = (left_iris.x - left_outer.x) / left_eye_width - 0.5
+        left_iris_pos_y = (left_iris.y - landmarks[145].y) / left_eye_height - 0.5
         
         right_eye_width = abs(right_outer.x - right_inner.x) + 1e-6
+        right_eye_height = abs(landmarks[386].y - landmarks[374].y) + 1e-6
         right_iris_pos = (right_iris.x - right_inner.x) / right_eye_width - 0.5
+        right_iris_pos_y = (right_iris.y - landmarks[374].y) / right_eye_height - 0.5
         
-        return (left_iris_pos + right_iris_pos) / 2.0
+        iris_x = (left_iris_pos + right_iris_pos) / 2.0
+        iris_y = (left_iris_pos_y + right_iris_pos_y) / 2.0
+        return (iris_x, iris_y)
 
     def close(self):
         pass
