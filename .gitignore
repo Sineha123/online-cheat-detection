@@ -54,3 +54,5 @@ dist/
 # Local database dumps
 *.sql.bak
 
+# Secret keys
+.flask_secret_key
