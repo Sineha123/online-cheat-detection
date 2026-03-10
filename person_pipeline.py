@@ -17,7 +17,7 @@ class PersonDetector:
     def __init__(self):
         self.class_names = getattr(_global_yolo_model, 'names', {}) or {}
         self.selective_label_map = {
-            # Phones â†’ treat as generic electronic device
+            # Phones -> treat as generic electronic device
             'cellphone': 'Mobile Phone',
             'cell phone': 'Mobile Phone',
             'mobile phone': 'Mobile Phone',
@@ -29,6 +29,10 @@ class PersonDetector:
             'copy': 'Document',
             'paper': 'Document',
             'document': 'Document',
+            # Pens (YOLO often misclassifies pens as these)
+            'toothbrush': 'Pen',
+            'knife': 'Pen',
+            'scissors': 'Pen',
         }
 
     def _normalize_label(self, label):

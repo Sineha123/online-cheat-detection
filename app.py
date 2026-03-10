@@ -16,7 +16,7 @@ import logging
 from functools import wraps
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -165,11 +165,33 @@ profileName = None
 # Configuration & Globals
 # -------------------------
 app = Flask(__name__, template_folder='templates', static_folder='static')
-app.secret_key = os.getenv('FLASK_SECRET_KEY') or secrets.token_hex(32)
+def _get_or_create_secret_key():
+    """Get a stable secret key - persists across restarts to keep sessions alive."""
+    env_key = os.getenv('FLASK_SECRET_KEY', '').strip()
+    if env_key:
+        return env_key
+    key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.flask_secret_key')
+    if os.path.exists(key_file):
+        with open(key_file, 'r') as f:
+            return f.read().strip()
+    new_key = secrets.token_hex(32)
+    try:
+        with open(key_file, 'w') as f:
+            f.write(new_key)
+    except Exception:
+        pass
+    return new_key
+
+app.secret_key = _get_or_create_secret_key()
 app.config['SECRET_KEY'] = app.secret_key
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = (os.getenv('COOKIE_SECURE', '0') == '1')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)
+
+@app.before_request
+def make_session_permanent():
+    session.permanent = True
 
 # MySQL config
 # Use 127.0.0.1 default to force TCP and avoid local socket/pipe resolution issues.
@@ -274,19 +296,38 @@ def _send_password_reset_email(to_email, display_name, reset_link):
         return False
 
 def current_user():
-    return session.get('user')
+    """Return the currently authenticated user from the role-keyed session slot.
+    Admin and student each have their own slot so one can never overwrite the other.
+    """
+    return session.get('admin_user') or session.get('student_user')
+
+def current_admin():
+    """Return admin user if logged in, else None."""
+    return session.get('admin_user')
+
+def current_student():
+    """Return student user if logged in, else None."""
+    return session.get('student_user')
 
 def require_role(role):
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            user = current_user()
+            # Check the role-specific session slot directly to avoid cross-role checks
+            role_upper = (role or '').upper()
+            if role_upper == 'ADMIN':
+                user = session.get('admin_user')
+            elif role_upper == 'STUDENT':
+                user = session.get('student_user')
+            else:
+                user = current_user()
+
             if not user:
                 if request.path.startswith('/api/'):
                     return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
                 flash('Please login first.', 'error')
                 return redirect(url_for('main'))
-            if role and user.get('Role') != role:
+            if role_upper and (user.get('Role') or '').upper() != role_upper:
                 if request.path.startswith('/api/'):
                     return jsonify({'ok': False, 'error': 'Forbidden'}), 403
                 flash('Unauthorized access.', 'error')
@@ -463,13 +504,15 @@ OCR_OBJECT_FALLBACK_ENABLED = (os.getenv('OCR_OBJECT_FALLBACK_ENABLED', '0') == 
 # Enable phone shape fallback so smooth/low-texture phones still trigger.
 PHONE_CONTOUR_FALLBACK_ENABLED = (os.getenv('PHONE_CONTOUR_FALLBACK_ENABLED', '1') == '1')
 
-# Objects that are prohibited during exam
+# # Objects that are prohibited during exam
 PROHIBITED_LABELS = {
     'cell phone', 'mobile phone', 'phone', 'smartphone',
     'camera', 'webcam',
     'book', 'notebook', 'copy', 'paper', 'document',
     'headphones', 'earphones', 'headset', 'earbuds', 'airpods', 'headfree', 'handsfree',
-    'electronic device', 'electronicdevice', 'device'
+    'electronic device', 'electronicdevice', 'device',
+    'pen', 'pencil',
+    'watch', 'smartwatch', 'clock'
 }
 
 def _normalize_label(label):
@@ -496,9 +539,13 @@ def _normalize_label(label):
         'head free': 'headphones',
         'headfree': 'headphones',
         'airpod': 'airpods',
+        'pencil': 'pen',
         'web cam': 'webcam',
         'books': 'book',
-        'camera phone': 'cell phone'
+        'camera phone': 'cell phone',
+        'smart watch': 'watch',
+        'smartwatch': 'watch',
+        'clock': 'watch'
     }
     return aliases.get(value, value)
 
@@ -523,6 +570,7 @@ if CV2_AVAILABLE and os.path.exists(HAAR_PATH):
     logger.info("Frontal Haar cascade loaded successfully")
 else:
     logger.warning(f"Frontal Haar cascade not found at {HAAR_PATH} or OpenCV not available.")
+
 if CV2_AVAILABLE and os.path.exists(HAAR_PROFILE_PATH):
     profile_face_cascade = cv2.CascadeClassifier(HAAR_PROFILE_PATH)
     logger.info("Profile Haar cascade loaded successfully")
@@ -593,7 +641,12 @@ if ULTRALYTICS_AVAILABLE:
         COCO_PROHIBITED_IDS = [
             63,  # laptop
             67,  # cell phone
+            72,  # tv
             73,  # book
+            74,  # mouse
+            75,  # remote
+            76,  # keyboard
+            85,  # clock (watch)
         ]
         for cid in COCO_PROHIBITED_IDS:
             if cid in yolo_class_names and cid not in prohibited_class_ids:
@@ -1152,33 +1205,73 @@ def _trigger_violation(student_id, student_name, violation_type, details, cooldo
             return False
         state['last_violation_by_label'][vtype] = now
 
-    logger.info(f"[TRIGGER PROCEEDING] sid={sid} type={vtype}")
+    logger.info(f"[TRIGGER PROCEEDING] sid={sid} type={vtype} details={details}")
+    
+    # 1. Store the runtime behavior record
     runtime_count, runtime_violation = _record_runtime_warning(sid, student_name, vtype, details)
-    final_count = runtime_count
+    
+    # 2. Extract explicit Penalty Score from DecisionEngine
+    final_score = 0
     try:
+        from app import _get_vision_engines
+        _, _, decision_engine, _ = _get_vision_engines()
+        
+        # Add external penalties not caught by vision engine directly
+        external_penalty = 0
+        if vtype == 'VOICE_DETECTED':
+            external_penalty = 25
+        elif vtype == 'CAMERA_OFF':
+            external_penalty = 20
+            
+        if external_penalty > 0 and hasattr(decision_engine, 'add_penalty'):
+            final_score = decision_engine.add_penalty(sid, external_penalty)
+        elif hasattr(decision_engine, 'get_state'):
+            state = decision_engine.get_state(sid)
+            final_score = state.get('warning_count', 0)
+    except Exception as e:
+        logger.warning(f"Could not extract explicit Penalty Score from Decision Engine: {e}")
+        final_score = max(runtime_count * 15, 0) # Fallback heuristic
+        
+    try:
+        # Sync old warning_system for admin legacy reasons
         if warning_system:
             if sid not in warning_system.warnings:
                 warning_system.initialize_student(sid, student_name)
             warning_system.add_warning(sid, vtype, details, emit_to_student=True)
-            final_count = max(final_count, int(warning_system.get_warnings(sid) or 0))
-            logger.info(f"[WARNING ADDED] sid={sid} type={vtype} total={final_count}")
+            logger.info(f"[WARNING ADDED] sid={sid} type={vtype} penalty_score={final_score}")
         else:
             logger.error(f"[WARNING FAILED] sid={sid} warning_system IS NONE")
     except Exception as e:
         logger.warning(f"Warning increment failed for student {sid}: {e}")
+        
+    # 3. Action Logic: Warning (>40) and Termination (>80)
     try:
         if socketio:
             payload = {
                 'student_id': sid,
                 'student_name': student_name,
-                'total_warnings': min(final_count, 3),
+                'total_warnings': final_score, # Overloaded legacy field to pass score
+                'penalty_score': final_score,
                 'violation': runtime_violation,
                 'type': vtype,
-                'details': details,
-                'source': 'server'
+                'details': f"{details} (Penalty Score: {final_score})",
+                'source': 'server',
+                'auto_terminate': final_score > 80
             }
-            socketio.emit('student_violation', payload, namespace='/student', room=f"student:{sid}")
+            
+            # Send the Warning to UI
+            if final_score > 40:
+                socketio.emit('student_violation', payload, namespace='/student', room=f"student:{sid}")
             socketio.emit('student_violation', payload, namespace='/admin')
+            
+            # Execute Hard Termination if > 80
+            if final_score > 80:
+                logger.warning(f"[TERMINATING EXAM] Student {sid} exceeded penalty threshold (Score: {final_score})")
+                socketio.emit('force_exam_terminate', {
+                    'student_id': sid, 
+                    'reason': 'Exam terminated due to excessive cheating violations.'
+                }, namespace='/student', room=f"student:{sid}")
+                
     except Exception as e:
         logger.warning(f"Socket warning sync failed for student {sid}: {e}")
 
@@ -1649,8 +1742,24 @@ def _run_student_frame_detection(student_id, student_name, frame):
         # Convert to RGB for MediaPipe
         frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
         
+        # --- CAMERA OBSTRUCTION DETECTION ---
+        # 0a. Check for intentional blur (hand held in front, fogged lens)
+        try:
+            _gray_obs = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+            _lap_var = cv2.Laplacian(_gray_obs, cv2.CV_64F).var()
+            _mean_bright = float(_gray_obs.mean())
+            # If image is extremely blurry (var < 10) AND not just a dark room
+            if _lap_var < 10.0 and _mean_bright > 20.0:
+                _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears intentionally blurred or obstructed")
+            # If image is almost completely dark (cam covered) for >2s, fire immediately
+            if _mean_bright < 12.0:
+                _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears covered or blocked")
+        except Exception:
+            pass
+        # --- END CAMERA OBSTRUCTION DETECTION ---
+        
         # 1. Face Analysis
-        face_detected, yaw_angle, ear, iris_offset, landmarks = face_analyzer.process_frame(frame_rgb)
+        face_detected, yaw_angle, pitch_angle, ear, iris_offset, landmarks = face_analyzer.process_frame(frame_rgb)
 
         face_bbox = None
         if landmarks:
@@ -1692,10 +1801,53 @@ def _run_student_frame_detection(student_id, student_name, frame):
 
                 filtered.append(obj)
             banned_objects = filtered
+            
+            # --- START EARBUD / HEADPHONE HEURISTIC ---
+            # MediaPipe bounding box helps isolate the ear regions
+            try:
+                h_frame, w_frame = processed.shape[:2]
+                face_w = face_bbox[2] - face_bbox[0]
+                face_h = face_bbox[3] - face_bbox[1]
+                
+                # Check regions immediately left and right of the face
+                ear_margin_w = int(face_w * 0.20)
+                ear_margin_h = int(face_h * 0.40)
+                
+                l_x1, l_x2 = max(0, face_bbox[0] - ear_margin_w), face_bbox[0]
+                r_x1, r_x2 = face_bbox[2], min(w_frame, face_bbox[2] + ear_margin_w)
+                y1, y2 = max(0, face_bbox[1] + int(face_h * 0.2)), min(h_frame, face_bbox[3] - int(face_h * 0.1))
+                
+                def _check_ear_roi(rx1, ry1, rx2, ry2):
+                    if rx2 - rx1 < 5 or ry2 - ry1 < 5: return False
+                    roi = processed[ry1:ry2, rx1:rx2]
+                    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                    v_channel = hsv[:, :, 2]
+                    
+                    # Look for bright white (Airpods) or solid dark (Over-ear bands)
+                    _, white_mask = cv2.threshold(v_channel, 210, 255, cv2.THRESH_BINARY)
+                    _, dark_mask = cv2.threshold(v_channel, 45, 255, cv2.THRESH_BINARY_INV)
+                    
+                    w_dens = cv2.countNonZero(white_mask) / (white_mask.size or 1)
+                    d_dens = cv2.countNonZero(dark_mask) / (dark_mask.size or 1)
+                    
+                    if w_dens > 0.06 or d_dens > 0.30:
+                        edges = cv2.Canny(cv2.GaussianBlur(v_channel, (5,5), 0), 40, 130)
+                        if cv2.countNonZero(edges) / (edges.size or 1) > 0.05:
+                            return True
+                    return False
+
+                if _check_ear_roi(l_x1, y1, l_x2, y2) or _check_ear_roi(r_x1, y1, r_x2, y2):
+                    banned_objects.append({
+                        "label": "Headphones/Earbuds",
+                        "bbox": (l_x1, y1, r_x2, y2, 0.85)
+                    })
+            except Exception as e:
+                pass
+            # --- END EARBUD HEURISTIC ---
         
         # 3. Evaluate Rule Violations
         warnings, penalty_score = decision_engine.evaluate(
-            sid, face_detected, person_count, yaw_angle, ear, iris_offset, banned_objects
+            sid, face_detected, person_count, yaw_angle, pitch_angle, ear, iris_offset, banned_objects
         )
         
         # 4. Integrate detections with warning persistence
@@ -1708,12 +1860,12 @@ def _run_student_frame_detection(student_id, student_name, frame):
                 _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
             elif "Head turned away" in w:
                 _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
-            # elif "Head turned" in w:
-            #     _persist_behavior_violation(sid, student_name, "DISTRACTION", "Please look at the screen (Head turned)")
-            # elif "Eyes not visible" in w:
-            #     _persist_behavior_violation(sid, student_name, "EYES_CLOSED", "Eyes not visible / Looking down")
-            # elif "Gazing" in w:
-            #     _persist_behavior_violation(sid, student_name, "DISTRACTION", "Gazing at another screen/paper")
+            elif "Head turned" in w:
+                _persist_behavior_violation(sid, student_name, "DISTRACTION", "Please look at the screen (Head turned)")
+            elif "Eyes not visible" in w:
+                _persist_behavior_violation(sid, student_name, "EYES_CLOSED", "Eyes not visible / Looking down")
+            elif "Gazing" in w:
+                _persist_behavior_violation(sid, student_name, "DISTRACTION", "Gazing at another screen/paper")
 
         for obj in banned_objects:
             bbox = obj.get('bbox') or (0, 0, 0, 0, 0.0)
@@ -1745,12 +1897,18 @@ def _run_student_frame_detection(student_id, student_name, frame):
             'eyes_closed_elapsed': 0.0,
             'looking_away': abs(yaw_angle) > config.YAW_THRESHOLD_DEG if face_detected else False,
             'looking_away_elapsed': 0.0,
-            'gaze_direction': "CENTER" if (abs(iris_offset[0]) if isinstance(iris_offset, (list, tuple)) else abs(iris_offset)) < config.IRIS_OFFSET_THRESHOLD and (abs(iris_offset[1]) if isinstance(iris_offset, (list, tuple)) and len(iris_offset)>1 else 0) < config.IRIS_OFFSET_THRESHOLD else "AWAY",
+            'gaze_direction': (
+                "LEFT" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 0 and abs(iris_offset[0]) > config.IRIS_OFFSET_THRESHOLD and iris_offset[0] < 0
+                else "RIGHT" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 0 and abs(iris_offset[0]) > config.IRIS_OFFSET_THRESHOLD and iris_offset[0] > 0
+                else "UP" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 1 and abs(iris_offset[1]) > getattr(config, 'IRIS_OFFSET_THRESHOLD_Y', 0.20) and iris_offset[1] < 0
+                else "DOWN" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 1 and abs(iris_offset[1]) > getattr(config, 'IRIS_OFFSET_THRESHOLD_Y', 0.20) and iris_offset[1] > 0
+                else "CENTER"
+            ),
             'no_face_elapsed': 0.0 if face_detected else 99.0,
-            'multi_face_detected': person_count > 1,
-            'multi_face_elapsed': 0.0,
-            'pose_left_seat': False,
-            'left_seat_elapsed': 0.0,
+            'multi_face_detected': int(person_count) > 1,
+            'multi_face_elapsed': 0.0 if int(person_count) <= 1 else 99.0,
+            'pose_left_seat': not face_detected,
+            'left_seat_elapsed': 0.0 if face_detected else 99.0,
             'movement_distracted': False,
             'movement_elapsed': 0.0,
         }
@@ -2056,12 +2214,19 @@ def login():
             except Exception:
                 mysql.connection.rollback()
 
-        session['user'] = {
+        session.permanent = True
+        user_data = {
             "Id": str(student_id),
             "Name": name,
             "Email": email,
             "Role": role
         }
+        if role == 'ADMIN':
+            # Admin gets its own slot — never overrides student session
+            session['admin_user'] = user_data
+        else:
+            # Student gets its own slot — never overrides admin session
+            session['student_user'] = user_data
         cur.close()
         
         if role == 'STUDENT':
@@ -2260,25 +2425,48 @@ def register():
 @app.route('/logout')
 def logout():
     global detection_threads_started
-    user = current_user()
-    if user and admin_monitor:
+    # Determine who is logging out so we only pop the right session slot
+    student = session.get('student_user')
+    admin = session.get('admin_user')
+    
+    if student:
+        # Student logout: clean up monitoring threads then pop only the student slot
+        sid_int = None
         try:
-            admin_monitor.stop_monitoring(user['Id'])
-        except Exception as e:
-            logger.error(f"Error stopping monitor: {e}")
-    with active_exam_students_lock:
-        if user:
-            active_exam_students.discard(int(user['Id']))
-    with latest_student_frames_lock:
-        if user:
-            latest_student_frames.pop(int(user['Id']), None)
-    with student_detection_state_lock:
-        if user:
-            student_detection_state.pop(int(user['Id']), None)
-    detection_threads_started = False
-    camera_streamer.release()
-    session.clear()
-    return render_template('login.html')
+            sid_int = int(student['Id'])
+        except Exception:
+            pass
+        if sid_int is not None:
+            if admin_monitor:
+                try:
+                    admin_monitor.stop_monitoring(sid_int)
+                except Exception as e:
+                    logger.error(f"Error stopping monitor: {e}")
+            with active_exam_students_lock:
+                active_exam_students.discard(sid_int)
+            with latest_student_frames_lock:
+                latest_student_frames.pop(sid_int, None)
+            with student_detection_state_lock:
+                student_detection_state.pop(sid_int, None)
+        detection_threads_started = False
+        camera_streamer.release()
+        # Only clear student-related keys — admin session preserved
+        session.pop('student_user', None)
+        session.pop('student_face_verified_at', None)
+        session.pop('face_verified_at', None)
+
+    elif admin:
+        # Admin logout: only remove admin slot — student exam session preserved
+        session.pop('admin_user', None)
+
+    return redirect(url_for('main'))
+
+
+@app.route('/admin-logout')
+def admin_logout():
+    """Dedicated admin logout — ONLY clears the admin session slot."""
+    session.pop('admin_user', None)
+    return redirect(url_for('main'))
 
 @app.route('/rules')
 @require_role('STUDENT')
@@ -2430,7 +2618,7 @@ def exam():
     print(f"🎯 Exam page ready for {student_name} (ID: {student_id})")
     # Strict gate: student must complete pre-exam face verification before exam session can start.
     session['face_verified_for_exam'] = False
-    session.pop('face_verified_at', None)
+    session.pop('student_face_verified_at', None)
     
     return render_template('Exam.html', 
                          student_id=student_id, 
@@ -2450,11 +2638,11 @@ def examSessionStart():
     student_id = str(user['Id'])
     student_name = user['Name']
     face_verified = bool(session.get('face_verified_for_exam'))
-    verified_at = session.get('face_verified_at')
+    verified_at = session.get('student_face_verified_at')
     # Fail-open: if verification state missing/expired, re-authorize to avoid start blockage
     if not face_verified:
         session['face_verified_for_exam'] = True
-        session['face_verified_at'] = time.time()
+        session['student_face_verified_at'] = time.time()
         logger.warning(f"Face verification missing for student {student_id}; auto-allowing exam start.")
     else:
         try:
@@ -2462,7 +2650,7 @@ def examSessionStart():
         except Exception:
             verify_age = 0
         if verify_age > 240:  # extend to 4 minutes to reduce spurious expiry
-            session['face_verified_at'] = time.time()
+            session['student_face_verified_at'] = time.time()
 
     try:
         with active_exam_students_lock:
@@ -2496,7 +2684,7 @@ def examSessionStart():
         detection_threads_started = True
         # One-time token: consume verification once exam session starts.
         session['face_verified_for_exam'] = False
-        session.pop('face_verified_at', None)
+        session.pop('student_face_verified_at', None)
         return jsonify({'ok': True, 'started': True})
     except Exception as e:
         logger.error(f"examSessionStart error: {e}", exc_info=True)
@@ -2543,17 +2731,39 @@ def preExamFaceVerify():
         analyzer = FaceAnalyzer()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        face_detected, yaw_angle, ear, iris_offsets, _ = analyzer.process_frame(rgb)
+        face_detected, yaw_angle, pitch_angle, ear, iris_offsets, landmarks = analyzer.process_frame(rgb)
         
         if not face_detected:
             return jsonify({
                 'ok': True,
                 'matched': False,
                 'distance': None,
-                'error': 'No face detected or show exactly one face clearly'
+                'error': 'No face detected. Show exactly one face clearly'
             }), 200
 
-        # Check if the face is looking mostly forward
+        # Check face size: face bounding box must be >= 4% of frame area (relaxed from 15%)
+        if landmarks:
+            xs = [p.x for p in landmarks]
+            ys = [p.y for p in landmarks]
+            face_area_ratio = (max(xs) - min(xs)) * (max(ys) - min(ys))
+            if face_area_ratio < 0.04:
+                return jsonify({
+                    'ok': True,
+                    'matched': False,
+                    'distance': None,
+                    'error': 'Face too small or too far. Move closer to the camera'
+                }), 200
+
+        # Check eyes are open (prevents photo/closed-eye bypass) - relaxed to 0.15
+        if ear < 0.15:
+            return jsonify({
+                'ok': True,
+                'matched': False,
+                'distance': None,
+                'error': 'Eyes not clearly visible. Open your eyes and look at the camera'
+            }), 200
+
+        # Check if the face is looking mostly forward (relaxed to 20.0 degrees)
         if abs(yaw_angle) > 20.0:
             return jsonify({
                 'ok': True,
@@ -2565,7 +2775,7 @@ def preExamFaceVerify():
         # Since dlib is absent, we skip 128-D vector distance matching,
         # but mark the face as "verified" since a legitimate face is clearly present.
         session['face_verified_for_exam'] = True
-        session['face_verified_at'] = time.time()
+        session['student_face_verified_at'] = time.time()
         
         return jsonify({
             'ok': True,

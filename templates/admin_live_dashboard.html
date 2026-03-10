@@ -529,8 +529,8 @@
 
         function logout() {
             if(confirm("Are you sure you want to logout?")) {
-                // Redirects to the Logout route which clears session
-                window.location.href = '/logout';
+                // Use admin-specific logout so student exam sessions are NOT affected
+                window.location.href = '/admin-logout';
             }
         }
         // -----------------------------
@@ -842,13 +842,16 @@
 
         function updateStudentCardFrame(studentId, frameData) {
             const card = document.getElementById(`student-${studentId}`);
-            if (card) {
+            if (card && frameData) {
                 const videoContainer = card.querySelector('.video-container');
                 const currentImg = videoContainer.querySelector('img.live-feed');
-                if (currentImg && currentImg.getAttribute('data-mode') === 'mjpeg') {
-                    return;
+                
+                if (currentImg) {
+                    currentImg.src = 'data:image/jpeg;base64,' + frameData;
+                    currentImg.removeAttribute('data-mode'); // Clear legacy mjpeg mode if present
+                } else {
+                    videoContainer.innerHTML = `<img class="live-feed" src="data:image/jpeg;base64,${frameData}" alt="Live Feed">`;
                 }
-                videoContainer.innerHTML = `<img class="live-feed" data-mode="mjpeg" src="/admin/live/${studentId}" alt="Live Feed">`;
             }
             if (studentsData[studentId] && !studentsData[studentId].startTime) {
                 studentsData[studentId].startTime = Date.now();
@@ -860,6 +863,7 @@
             if (modalFeed && frameData) {
                 modalFeed.src = 'data:image/jpeg;base64,' + frameData;
                 modalFeed.style.display = 'block';
+                document.getElementById('modal-loading').style.display = 'none';
             }
         }
 

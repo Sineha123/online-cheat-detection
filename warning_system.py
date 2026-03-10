@@ -18,12 +18,12 @@ if hasattr(sys.stdout, "reconfigure"):
 class WarningSystem:
     """Track warnings per student and emit events when thresholds reached."""
     
-    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=3):
+    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=5):
         self.socketio = socketio_instance
         self.admin_monitor = admin_monitor
         self.max_warnings = max_warnings
         auto_env = os.getenv('AUTO_TERMINATE_DEFAULT', '1')
-        # Default ON so the 3rd warning is shown then termination occurs after 3 seconds.
+        # Default ON so the Nth warning is shown then termination occurs after 3 seconds.
         self.auto_terminate = str(auto_env).strip() not in ('0', 'false', 'False')
         self.lock = threading.Lock()
         self.warnings = {}  # student_id -> count
@@ -33,19 +33,34 @@ class WarningSystem:
         self.last_warning_type_at = {}  # student_id -> {type: epoch seconds}
         self.termination_timer = {}  # student_id -> Timer handle
 
-        # Apply a minimum gap for ALL warning increments — 3.0 seconds only.
-        self.global_gap_seconds = 3.0
-        self.type_gap_seconds = {k: 3.0 for k in [
-            'NO_FACE','MULTIPLE_FACES','VOICE_DETECTED','PROHIBITED_OBJECT','TAB_SWITCH',
-            'PROHIBITED_SHORTCUT','HEAD_MOVEMENT','DISTRACTION','STUDENT_LEFT_SEAT',
-            'EYES_CLOSED','GAZE_LEFT','GAZE_RIGHT','GAZE_UP','GAZE_DOWN','IDENTITY_MISMATCH'
-        ]}
+        # Global minimum gap between any two warnings (seconds)
+        self.global_gap_seconds = 5.0
+        # Per-type gaps — critical items fire faster; minor distractions fire slower
+        self.type_gap_seconds = {
+            # Immediate threats — fire quickly but not spam
+            'PROHIBITED_OBJECT':    5.0,
+            'MULTIPLE_FACES':       4.0,
+            'TAB_SWITCH':           3.0,
+            'PROHIBITED_SHORTCUT':  3.0,
+            'VOICE_DETECTED':       8.0,   # audio: only after 8s continuous
+            'IDENTITY_MISMATCH':    5.0,
+            # Behavioural distractions — need longer persistence
+            'NO_FACE':             10.0,   # must be absent for >10s
+            'DISTRACTION':         10.0,   # gaze/head away — needs repetition
+            'HEAD_MOVEMENT':       10.0,
+            'STUDENT_LEFT_SEAT':    5.0,
+            'EYES_CLOSED':          8.0,
+            'GAZE_LEFT':           10.0,
+            'GAZE_RIGHT':          10.0,
+            'GAZE_UP':             10.0,
+            'GAZE_DOWN':           10.0,
+        }
         self.type_gap_seconds['TERMINATED_BY_ADMIN'] = 0.0
 
     def set_auto_terminate(self, enabled: bool):
         with self.lock:
             self.auto_terminate = enabled
-        print(f"⚙️ WarningSystem Auto-Terminate configured: {self.auto_terminate}")
+        print(f"[WarningSystem] Auto-Terminate configured: {self.auto_terminate}")
 
     def initialize_student(self, student_id, student_name):
         """Initialize tracking for a new student"""

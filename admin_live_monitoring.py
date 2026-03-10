@@ -81,8 +81,8 @@ VOICE_CHUNK_SIZE = int(os.getenv('VOICE_CHUNK_SIZE', str(_VOICE_CHUNK_DEFAULT)))
 VOICE_RMS_THRESHOLD = float(os.getenv('VOICE_RMS_THRESHOLD', '0.010'))  # lowered: catch soft voices
 VOICE_NOISE_MULTIPLIER = float(os.getenv('VOICE_NOISE_MULTIPLIER', '1.4'))  # less suppression
 VOICE_NOISE_FLOOR_MIN = float(os.getenv('VOICE_NOISE_FLOOR_MIN', '0.005'))
-VOICE_CONTINUOUS_SECONDS = float(os.getenv('VOICE_CONTINUOUS_SECONDS', '0.4'))  # trigger in 0.4s
-VOICE_SILENCE_RESET_SECONDS = float(os.getenv('VOICE_SILENCE_RESET_SECONDS', '0.25'))
+VOICE_CONTINUOUS_SECONDS = float(os.getenv('VOICE_CONTINUOUS_SECONDS', '8.0'))  # Trigger in 8.0s per user request
+VOICE_SILENCE_RESET_SECONDS = float(os.getenv('VOICE_SILENCE_RESET_SECONDS', '1.0'))
 VOICE_BACKEND = (os.getenv('VOICE_BACKEND', 'auto') or 'auto').strip().lower()  # auto|sounddevice|pyaudio
 VOICE_DEVICE_INDEX = os.getenv('VOICE_DEVICE_INDEX', '').strip()  # optional int
 VOICE_SAVE_RAW_AUDIO = (os.getenv('VOICE_SAVE_RAW_AUDIO', '1') == '1')
@@ -802,6 +802,21 @@ class AdminMonitor:
                                         # (Socket emit handled by app.py)
                             except Exception as e:
                                 print(f"⚠️ Warning error: {e}")
+                                
+                        # EMIT FRAME TO ADMIN DASHBOARD (Fix for missing live feed)
+                        if frame is not None and not no_live_frame:
+                            try:
+                                _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                                b64_frame = base64.b64encode(jpeg.tobytes()).decode('ascii')
+                                if self.socketio and b64_frame:
+                                    self.socketio.emit('student_frame', {
+                                        'student_id': student_id,
+                                        'student_name': student_name,
+                                        'frame': b64_frame,
+                                        'timestamp': time.time()
+                                    }, namespace='/admin')
+                            except Exception as e:
+                                print(f"Socket emit error for {student_id}: {e}")
                         
                         time.sleep(1.0 / self.fps)
                         continue

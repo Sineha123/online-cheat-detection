@@ -7,8 +7,8 @@ _global_face_mesh = _mp_face_mesh.FaceMesh(
     static_image_mode=False,  # use video mode for speed + temporal smoothing
     max_num_faces=3,          # detect multiple faces in frame
     refine_landmarks=True, 
-    min_detection_confidence=0.35,
-    min_tracking_confidence=0.35,
+    min_detection_confidence=0.50,
+    min_tracking_confidence=0.50,
 )
 _face_lock = threading.Lock()
 
@@ -26,6 +26,7 @@ class FaceAnalyzer:
         
         face_detected = False
         yaw_angle = 0.0
+        pitch_angle = 0.0
         ear = 0.0
         iris_offset_ratio = (0.0, 0.0)  # (x, y)
         out_landmarks = []
@@ -42,26 +43,41 @@ class FaceAnalyzer:
             face_landmarks = max(areas, key=lambda t: t[0])[1] if areas else results.multi_face_landmarks[0]
             out_landmarks = face_landmarks.landmark
             
-            yaw_angle = self._estimate_yaw(out_landmarks)
+            yaw_angle, pitch_angle = self._estimate_yaw_pitch(out_landmarks)
             ear = self._calculate_ear(out_landmarks)
             iris_offset_ratio = self._calculate_iris_offsets(out_landmarks)
             
-        return face_detected, yaw_angle, ear, iris_offset_ratio, out_landmarks
+        return face_detected, yaw_angle, pitch_angle, ear, iris_offset_ratio, out_landmarks
         
-    def _estimate_yaw(self, landmarks):
+    def _estimate_yaw_pitch(self, landmarks):
         left_eye = landmarks[33]
         right_eye = landmarks[263]
         nose_tip = landmarks[1]
+        chin = landmarks[152]
         
         eye_center_x = (left_eye.x + right_eye.x) / 2.0
+        eye_center_y = (left_eye.y + right_eye.y) / 2.0
         face_width = abs(right_eye.x - left_eye.x)
+        face_height = abs(chin.y - eye_center_y)
         
         if face_width == 0:
             face_width = 0.0001
+        if face_height == 0:
+            face_height = 0.0001
             
-        offset = nose_tip.x - eye_center_x
-        normalized_offset = offset / face_width
-        return (normalized_offset / 0.20) * 25.0
+        # Yaw
+        offset_x = nose_tip.x - eye_center_x
+        normalized_offset_x = offset_x / face_width
+        yaw = (normalized_offset_x / 0.20) * 25.0
+
+        # Pitch
+        # Standardize center offset to assume camera is roughly straight-on
+        offset_y = nose_tip.y - eye_center_y 
+        normalized_offset_y = offset_y / face_height
+        # Approximate scaling to degrees using standard face ratio ~0.50 offset at rest
+        pitch = ((normalized_offset_y - 0.45) / 0.20) * 20.0
+        
+        return yaw, pitch
 
     def _distance(self, p1, p2):
         return math.hypot(p1.x - p2.x, p1.y - p2.y)
