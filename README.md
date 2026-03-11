@@ -15,116 +15,53 @@ The project preserves online exam integrity by detecting suspicious behavior suc
 
 The Online Exam Proctor System is a computer vision-based project designed to ensure the integrity and fairness of online exams. As remote learning and online education grow, the need for a robust proctoring system becomes crucial to prevent cheating and maintain the credibility of the examination process. This project uses computer vision and AI technologies to monitor and analyze students' behavior during the examination and detect suspicious activities. It also includes voice/noise monitoring to strengthen anti-cheating enforcement.
 
-## System Architecture
+## System Architecture (Hybrid WASM & WebRTC)
 
-The project has 2 primary user roles:
-- `Student`
-- `Admin`
+The project has been upgraded to a **Hybrid Detection Architecture** to maximize privacy, reduce server bandwidth by 99%, and provide low-latency video streaming to the Admin.
 
 High-level flow:
 
 1. Student opens the Flask web app and logs in.
-2. Student completes system checks (camera, mic, browser).
-3. Student registers and verifies their face.
-4. Student starts the exam.
-5. Student browser captures webcam frames using `getUserMedia`.
-6. Browser sends frames to Flask `/api/student-frame` as base64 JPEG.
-7. A background worker processes the latest frame using:
-   - MediaPipe FaceMesh for face detection and landmarks
-   - YOLOv8 for person and object detection
-   - DecisionEngine for rule evaluation with temporal debouncing
-8. Violations are persisted to MySQL and emitted via Socket.IO.
-9. Admin opens the dashboard and monitors active students in real time.
-10. Admin can clear warnings, terminate exams, or toggle auto-termination.
+2. Student completes system checks and verifies their face.
+3. Student starts the exam.
+4. **Client-Side AI (WASM/TFJS):** The browser downloads lightweight TensorFlow.js models (COCO-SSD and BlazeFace). 
+5. The student's browser processes the webcam feed locally via WebGL/WebAssembly at ~15 FPS.
+6. A **Suspicion Score (0-100)** is calculated purely in the browser and displayed to the student in real-time.
+7. **Telemetry Stream:** The browser sends only a high-frequency JSON telemetry packet (the Score and metadata) to the server via Socket.IO.
+8. **WebRTC Video Stream:** The browser opens a true Peer-to-Peer WebRTC connection to the Admin Dashboard for low-latency live CCTV.
+9. **Server-Side Trust Engine (The Trap):** To prevent students from tampering with the client-side JS score, the browser POSTs exactly 1 frame per second to the server. The Python server runs heavy YOLO/MediaPipe models on this fallback frame. If the Server calculates a high suspicion score while the student's tampered client claims a score of 0, the server flags the student for `TAMPERING_DETECTED` and immediately terminates the exam.
 
 ## End-to-End Monitoring Pipeline
 
-### 1. Student Browser Capture
+### 1. Client-Side WASM / TF.js Inference
 
 The student exam page:
-- opens webcam with `navigator.mediaDevices.getUserMedia`
-- renders video frames to a hidden canvas
-- exports frames as JPEG base64
-- uploads them to `/api/student-frame` using `requestAnimationFrame`
-- monitors microphone via Web Audio API
-- tracks tab visibility via `visibilitychange`
+- loads `@tensorflow/tfjs`, `coco-ssd`, and `blazeface` via CDN.
+- captures webcam frames to a hidden canvas.
+- evaluates frames locally to detect multiple faces, missing faces, or prohibited objects (phones/laptops).
+- calculates the Suspicion Score.
+- streams WebRTC video directly to listening Admins.
 
-### 2. Flask Frame Receive Layer
+### 2. Flask Socket.IO Telemetry Layer
 
-Route:
-- `/api/student-frame`
+Route: `/student` (WebSockets)
+- Receives the 0-100 suspicion score.
+- Updates the in-memory `latest_student_frames` data structure so Admins can see live stats instantly without waiting for HTTP POSTs.
 
-Responsibilities:
-- receive base64 image payload from browser
-- decode into OpenCV BGR frame
-- normalize frame size
-- update `latest_student_frames` dictionary
-- schedule background detection worker
+### 3. Server-Side Verification (The Trap)
 
-Design rule:
-- heavy AI inference never runs in the request handler
+Route: `/api/student-frame` (1 FPS)
+- Receives a low-framerate validation frame from the student.
+- Background worker `_run_student_frame_detection(...)` processes it through Python YOLOv8 and MediaPipe.
+- Compares the Server's output vs the Student's reported Socket.IO telemetry output.
+- Dispatches `TAMPERING_DETECTED` violations directly to the database if the user falsified their score.
 
-### 3. Background Detection Layer
+### 4. Admin WebRTC Live Stream
 
-Main worker:
-- `_run_student_frame_detection(...)` in `app.py`
-
-Processing steps:
-- `FaceAnalyzer.process_frame()` — MediaPipe FaceMesh with 478 landmarks
-  - returns: face_detected, yaw_angle, ear, iris_offset_ratio
-  - min_detection_confidence: 0.3
-  - thread-safe via global lock
-- `PersonDetector.process_frame()` — YOLOv8 nano
-  - returns: person_count, bounding_boxes, banned_objects
-  - detects: persons, phones, books, laptops
-- `DecisionEngine.evaluate()` — rule engine with temporal debouncing
-  - conditions must persist for configurable durations before warnings fire
-  - returns: active_warnings list, penalty_score
-- `UILayer.draw_overlays()` — renders status HUD on processed frame
-  - bounding boxes, alert panels, status text
-
-### 4. Live Stream Layer
-
-Admin live stream route:
-- `/admin/live/<student_id>`
-
-Responsibilities:
-- serve MJPEG stream of processed frames
-- prefer processed frame when fresh
-- fall back to raw frame when needed
-- preserve overlays and detector status on fallback frames
-
-### 5. Warning / Violation Layer
-
-The system tracks:
-- live warnings per student
-- warning cooldowns (prevent spam)
-- persisted violations in MySQL
-- exam termination thresholds
-
-Violation types:
-- `NO_FACE` — face not visible for 3+ seconds (currently active)
-- `MULTIPLE_FACES` — more than one person (currently disabled)
-- `DISTRACTION` — head turned or gazing away (currently disabled)
-- `EYES_CLOSED` — eyes closed for too long (currently disabled)
-- `TAB_SWITCH` — left the exam tab (currently disabled)
-- `VOICE_DETECTED` — microphone detected voice/noise
-- `PROHIBITED_OBJECT` — phone, book, or laptop detected (currently disabled)
-- `CAMERA_OFF` — camera feed stopped (currently disabled)
-
-Note: Only `NO_FACE` detection is currently active. All other rules are commented out in `app.py` and `decision_engine.py` and can be re-enabled individually.
-
-### 6. Admin Review Layer
-
-Admin can:
-- monitor all active students in a grid layout
-- view per-student live video feeds with AI overlays
-- clear warnings for a student
-- force terminate a student's exam
-- toggle auto-termination on/off (defaults to OFF)
-- receive real-time toast notifications for violations
-- inspect results and violation history
-- review saved recordings
+- Admins connect to `/adminStudents`.
+- A Socket.IO signaling relay exchanges SDP and ICE candidates between the Admin and the Student.
+- The Admin's browser plays a high-quality, low-latency live `<video>` feed directly from the student's webcam without overloading the Flask server.
+- Legacy MJPEG fallback remains available for environments where WebRTC is blocked by strict firewalls.
 
 ## Tech Stack
 

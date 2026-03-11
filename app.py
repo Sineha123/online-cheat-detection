@@ -1881,6 +1881,36 @@ def _run_student_frame_detection(student_id, student_name, frame):
                 f"Detected {int(person_count)} persons in camera"
             )
 
+        # --- PHASE 2: SERVER-SIDE ANTI-TAMPERING ("TRUST BUT VERIFY") ---
+        # The client sends a real-time 'Suspicion Score' via WebSocket to latest_student_frames.
+        # We periodically sample the video feed on the server (approx 1 FPS) via _run_student_frame_detection.
+        # Here we compare the server's AI penalty_score vs the client's reported score.
+        with latest_student_frames_lock:
+            client_status = latest_student_frames.get(sid, {}).get('status_snapshot', {})
+            client_reported_score = client_status.get('suspicion_score', 0)
+        
+        # Calculate an equivalent baseline score from the server's perspective
+        server_score = 0
+        if int(person_count) > 1: server_score += 50
+        elif int(person_count) == 0: server_score += 40
+        for obj in banned_objects:
+            lbl = str(obj.get('label', '')).lower()
+            if 'phone' in lbl or 'cell' in lbl: server_score += 80
+            if 'laptop' in lbl: server_score += 40
+            if 'book' in lbl: server_score += 30
+
+        # If server detects blatant cheating (score >= 60) but client is reporting total innocence (score < 20)
+        # This implies the student has modified their local JS or TFJS models to freeze the score.
+        if server_score >= 60 and client_reported_score < 20:
+             logger.critical(f"🚨 [ANTI-TAMPERING] Student {sid} is faking telemetry! Client says {client_reported_score}, Server says {server_score}")
+             _persist_behavior_violation(
+                 sid, 
+                 student_name, 
+                 "TAMPERING_DETECTED", 
+                 f"Client-side detection tampering identified (Server Score {server_score} > Client Score {client_reported_score})"
+             )
+        # --- END ANTI-TAMPERING ---
+
         # 5. Draw the unified HUD before encoding
         UILayer.draw_overlays(processed, warnings, penalty_score, bboxes, banned_objects, 0.0, landmarks, iris_offset)
         
@@ -4302,6 +4332,51 @@ if MONITORING_ENABLED and socketio:
         else:
             logger.info(f"[TAB_SWITCH IGNORED] missing student_id details={details}")
 
+    # --- WASM TELEMETRY LAYER ---
+    @socketio.on('telemetry_update', namespace='/student')
+    def handle_telemetry_update(data):
+        student_id = str(data.get('student_id'))
+        score = data.get('score', 0)
+        faces = data.get('faces', 0)
+        objects = data.get('objects', {})
+        
+        sid_str = student_id
+        now_ts = time.time()
+        
+        with latest_student_frames_lock:
+            prev = latest_student_frames.get(sid_str, {})
+            # Keep student alive in the active students polling, and update their telemetry
+            if score >= 50:
+                logger.info(f"🚨 [WASM TELEMETRY] High Suspicion for {sid_str}: Score {score}")
+                
+            latest_student_frames[sid_str] = {
+                'frame': prev.get('frame'),
+                'processed_frame': prev.get('processed_frame'),
+                'timestamp': prev.get('timestamp', now_ts), 
+                'frame_timestamp': prev.get('frame_timestamp', now_ts),
+                'processed_timestamp': now_ts,
+                'detections': prev.get('detections', []),
+                'status_snapshot': {
+                    'warning_count': int(warning_system.get_warnings(sid_str) if warning_system else 0),
+                    'suspicion_score': score,
+                    'faces_detected': faces,
+                    'phone_detected': objects.get('phone', False),
+                    'laptop_detected': objects.get('laptop', False)
+                },
+                'last_visible_object_labels': prev.get('last_visible_object_labels', []),
+                'last_prohibited_object_labels': ['cell phone'] if objects.get('phone') else [],
+                'last_person_count': faces,
+            }
+
+    # --- WEBRTC SIGNALING (STUDENT -> ADMIN) ---
+    @socketio.on('webrtc_offer', namespace='/student')
+    def handle_webrtc_offer(data):
+        socketio.emit('webrtc_offer', data, namespace='/admin')
+
+    @socketio.on('webrtc_ice_candidate', namespace='/student')
+    def handle_webrtc_ice_student(data):
+        socketio.emit('webrtc_ice_candidate', data, namespace='/admin')
+
     # --- ADMIN CONTROL ACTIONS ---
     @socketio.on('admin_clear_warnings', namespace='/admin')
     def handle_admin_clear_warnings(data):
@@ -4328,6 +4403,22 @@ if MONITORING_ENABLED and socketio:
         if warning_system:
             warning_system.set_auto_terminate(enabled)
             emit('enforcement_toggled', {'enabled': enabled}, namespace='/admin')
+
+    # --- WEBRTC SIGNALING (ADMIN -> STUDENT) ---
+    @socketio.on('request_webrtc_stream', namespace='/admin')
+    def handle_request_webrtc_stream(data):
+        student_id = data.get('student_id')
+        socketio.emit('request_webrtc_stream', data, namespace='/student', room=f"student:{student_id}")
+
+    @socketio.on('webrtc_answer', namespace='/admin')
+    def handle_webrtc_answer(data):
+        student_id = data.get('student_id')
+        socketio.emit('webrtc_answer', data, namespace='/student', room=f"student:{student_id}")
+
+    @socketio.on('webrtc_ice_candidate', namespace='/admin')
+    def handle_webrtc_ice_admin(data):
+        student_id = data.get('student_id')
+        socketio.emit('webrtc_ice_candidate', data, namespace='/student', room=f"student:{student_id}")
 
 # -------------------------
 # App entrypoint

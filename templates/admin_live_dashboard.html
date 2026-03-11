@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,7 +12,9 @@
             padding: 0;
             box-sizing: border-box;
         }
-        html, body {
+
+        html,
+        body {
             width: 100%;
             overflow-x: hidden;
         }
@@ -25,7 +28,7 @@
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             padding: 15px 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -50,8 +53,8 @@
 
         .nav-btn {
             padding: 8px 16px;
-            border: 1px solid rgba(255,255,255,0.6);
-            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255, 255, 255, 0.6);
+            background: rgba(255, 255, 255, 0.1);
             color: white;
             border-radius: 6px;
             cursor: pointer;
@@ -65,12 +68,14 @@
         }
 
         .nav-btn:hover {
-            background: rgba(255,255,255,0.3);
+            background: rgba(255, 255, 255, 0.3);
             transform: translateY(-2px);
         }
 
         /* Responsive helpers */
-        img, video, canvas {
+        img,
+        video,
+        canvas {
             max-width: 100%;
             height: auto;
         }
@@ -96,7 +101,7 @@
             background: white;
             padding: 20px;
             border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
             text-align: center;
         }
 
@@ -122,13 +127,13 @@
             background: white;
             border-radius: 10px;
             overflow: hidden;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
             transition: transform 0.3s;
         }
 
         .student-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.15);
         }
 
         .student-header {
@@ -159,7 +164,7 @@
 
         .student-status {
             padding: 5px 10px;
-            background: rgba(255,255,255,0.2);
+            background: rgba(255, 255, 255, 0.2);
             border-radius: 15px;
             font-size: 12px;
         }
@@ -316,7 +321,7 @@
             background: #f44336;
             color: white;
             border-radius: 5px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
             animation: slideIn 0.3s ease-out;
             z-index: 1000;
         }
@@ -334,6 +339,7 @@
                 transform: translateX(400px);
                 opacity: 0;
             }
+
             to {
                 transform: translateX(0);
                 opacity: 1;
@@ -347,7 +353,7 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.8);
+            background: rgba(0, 0, 0, 0.8);
             z-index: 2000;
             justify-content: center;
             align-items: center;
@@ -431,6 +437,7 @@
         }
     </style>
 </head>
+
 <body>
     <!-- Updated Header with Buttons -->
     <div class="dashboard-header">
@@ -488,9 +495,15 @@
                 <button class="close-btn" onclick="closeLiveFeed()">×</button>
             </div>
             <div class="modal-body">
-                <div class="live-feed-container">
-                    <img class="modal-live-feed" id="modal-live-feed" src="" alt="Live Feed">
-                    <div class="loading" id="modal-loading">
+                <div class="live-feed-container" style="position:relative; display:flex; justify-content:center;">
+                    <!-- Fallback MJPEG (z-index:1) -->
+                    <img class="modal-live-feed" id="modal-live-feed" src="" alt="Live Feed"
+                        style="position:relative; z-index:1;">
+                    <!-- WebRTC P2P Stream (z-index:2) overlay -->
+                    <video class="modal-live-feed" id="modal-webrtc-feed" autoplay playsinline muted
+                        style="position:absolute; top:0; left:0; width:100%; height:100%; object-fit:contain; z-index:2; display:none; background:#000;"></video>
+
+                    <div class="loading" id="modal-loading" style="position:absolute; z-index:3;">
                         🔄 Loading live feed...
                     </div>
                 </div>
@@ -528,7 +541,7 @@
         }
 
         function logout() {
-            if(confirm("Are you sure you want to logout?")) {
+            if (confirm("Are you sure you want to logout?")) {
                 // Use admin-specific logout so student exam sessions are NOT affected
                 window.location.href = '/admin-logout';
             }
@@ -536,17 +549,17 @@
         // -----------------------------
 
         // Socket event handlers
-        socket.on('connect', function() {
+        socket.on('connect', function () {
             console.log('✅ Connected to admin dashboard');
             updateConnectionStatus(true);
             showAlert('Connected to monitoring server', 'success');
-            
+
             // Request initial student list
             socket.emit('request_all_feeds');
             syncActiveStudents();
         });
 
-        socket.on('disconnect', function() {
+        socket.on('disconnect', function () {
             console.log('❌ Disconnected from admin dashboard');
             // Keep UI healthy if polling APIs are still reachable.
             if (Date.now() > pollHealthyUntil) {
@@ -554,24 +567,96 @@
             }
         });
 
-        socket.on('connect_error', function(err) {
+        socket.on('connect_error', function (err) {
             console.log('Admin socket connect_error:', err);
             if (Date.now() > pollHealthyUntil) {
                 updateConnectionStatus(false);
             }
         });
 
-        socket.on('connection_response', function(data) {
+        socket.on('connection_response', function (data) {
             console.log('Server connection confirmed:', data);
         });
 
+        // --- WebRTC Peer-to-Peer System ---
+        const peerConnections = {};
+
+        function getOrCreatePeerConnection(studentId) {
+            if (peerConnections[studentId]) return peerConnections[studentId];
+
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            peerConnections[studentId] = pc;
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('webrtc_ice_candidate', { student_id: studentId, candidate: event.candidate });
+                }
+            };
+
+            pc.ontrack = (event) => {
+                const stream = event.streams[0];
+                const gridVideo = document.getElementById(`video-${studentId}`);
+                if (gridVideo) {
+                    if (gridVideo.srcObject !== stream) gridVideo.srcObject = stream;
+                    gridVideo.style.display = 'block';
+                }
+
+                if (currentStreamingStudent == studentId) {
+                    const modalVideo = document.getElementById('modal-webrtc-feed');
+                    if (modalVideo) {
+                        if (modalVideo.srcObject !== stream) modalVideo.srcObject = stream;
+                        modalVideo.style.display = 'block';
+                        document.getElementById('modal-loading').style.display = 'none';
+                        console.log(`[WebRTC] P2P Stream connected for ${studentId}`);
+                    }
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                    console.log(`[WebRTC] P2P Stream lost for ${studentId}`);
+                    const gridVideo = document.getElementById(`video-${studentId}`);
+                    if (gridVideo) gridVideo.style.display = 'none';
+                    if (currentStreamingStudent == studentId) {
+                        const modalVideo = document.getElementById('modal-webrtc-feed');
+                        if (modalVideo) modalVideo.style.display = 'none';
+                    }
+                }
+            };
+            return pc;
+        }
+
+        socket.on('webrtc_offer', async (data) => {
+            try {
+                const studentId = data.student_id;
+                const pc = getOrCreatePeerConnection(studentId);
+                await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                socket.emit('webrtc_answer', {
+                    student_id: studentId,
+                    answer: pc.localDescription
+                });
+            } catch (e) { console.error('WebRTC Answer Error:', e); }
+        });
+
+        socket.on('webrtc_ice_candidate', async (data) => {
+            try {
+                const studentId = data.student_id;
+                const pc = peerConnections[studentId];
+                if (pc && data.candidate) {
+                    await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            } catch (e) { console.error('WebRTC ICE Error:', e); }
+        });
+
         // Handle students list updates
-        socket.on('students_list', function(data) {
+        socket.on('students_list', function (data) {
             console.log('📊 Students list updated:', data);
-            
+
             if (data.students && data.students.length > 0) {
                 document.getElementById('loading-message').style.display = 'none';
-                
+
                 data.students.forEach(student => {
                     const key = String(student.student_id);
                     if (!studentsData[key]) {
@@ -596,10 +681,10 @@
         });
 
         // Handle student violations
-        socket.on('student_violation', function(data) {
+        socket.on('student_violation', function (data) {
             console.log('⚠️ Violation detected:', data);
             const key = String(data.student_id);
-            
+
             if (!studentsData[key]) {
                 studentsData[key] = {
                     student_id: key,
@@ -612,7 +697,7 @@
                     lastUpdate: null
                 };
             }
-            
+
             studentsData[key].warnings = data.total_warnings || 0;
             studentsData[key].violations = studentsData[key].violations || [];
             studentsData[key].lastUpdate = Date.now();
@@ -625,20 +710,20 @@
             if (studentsData[key].warnings >= 3 && !studentsData[key].endTime) {
                 studentsData[key].endTime = Date.now();
             }
-            
+
             totalWarnings++;
-            
+
             updateDashboard();
-            
+
             const violationType = data.violation?.type || 'Unknown violation';
             showAlert(`⚠️ ${data.student_name}: ${violationType} (Warning ${data.total_warnings}/3)`);
         });
 
         // Handle live video frames
-        socket.on('student_frame', function(data) {
+        socket.on('student_frame', function (data) {
             console.log('📹 Received frame for student:', data.student_id);
             const key = String(data.student_id);
-            
+
             // Update student data with frame
             if (studentsData[key]) {
                 if (!studentsData[key].startTime) {
@@ -646,38 +731,38 @@
                 }
                 studentsData[key].lastFrame = data.frame;
                 studentsData[key].lastUpdate = Date.now();
-                
+
                 // Update mini feed in student card
                 updateStudentCardFrame(key, data.frame);
-                
+
                 // Modal uses dedicated MJPEG route; do not override with socket frame.
             }
         });
 
         // Handle exam termination
-        socket.on('student_exam_terminated', function(data) {
+        socket.on('student_exam_terminated', function (data) {
             console.log('❌ Exam terminated:', data);
             terminatedExams++;
-            
+
             if (studentsData[data.student_id]) {
                 studentsData[data.student_id].endTime = studentsData[data.student_id].endTime || Date.now();
                 showAlert(`❌ ${data.student_name}'s exam terminated: ${data.reason}`);
                 delete studentsData[data.student_id];
             }
-            
+
             updateDashboard();
         });
 
         // Handle feed started confirmation
-        socket.on('feed_started', function(data) {
+        socket.on('feed_started', function (data) {
             console.log('✅ Feed started for student:', data.student_id);
             document.getElementById('modal-loading').style.display = 'none';
         });
 
         // Handle feed errors
-        socket.on('feed_error', function(data) {
+        socket.on('feed_error', function (data) {
             console.log('❌ Feed error:', data);
-            document.getElementById('modal-loading').innerHTML = 
+            document.getElementById('modal-loading').innerHTML =
                 '❌ Error: ' + (data.error || 'Failed to load feed');
         });
 
@@ -699,7 +784,7 @@
             document.getElementById('total-students').textContent = activeStudents;
             document.getElementById('total-warnings').textContent = totalWarnings;
             document.getElementById('terminated-exams').textContent = terminatedExams;
-            
+
             let activeViolations = 0;
             Object.values(studentsData).forEach(student => {
                 if (student.warnings > 0) activeViolations++;
@@ -740,7 +825,7 @@
                                 ...student,
                                 startTime: studentsData[sid].startTime || Date.now(),
                                 lastUpdate: Date.now(),
-                                endTime: studentsData[sid].endTime || (student.warnings >=3 ? Date.now() : null)
+                                endTime: studentsData[sid].endTime || (student.warnings >= 3 ? Date.now() : null)
                             };
                         }
                     });
@@ -756,14 +841,14 @@
         function updateStudentsGrid() {
             const grid = document.getElementById('students-grid');
             const students = Object.values(studentsData);
-            
+
             if (students.length === 0) {
                 document.getElementById('loading-message').style.display = 'block';
-                document.getElementById('loading-message').innerHTML = 
+                document.getElementById('loading-message').innerHTML =
                     '<p>🔄 Waiting for students to start exams...</p>';
                 return;
             }
-            
+
             document.getElementById('loading-message').style.display = 'none';
             grid.innerHTML = '';
 
@@ -777,24 +862,27 @@
             const card = document.createElement('div');
             card.className = 'student-card';
             card.id = `student-${student.student_id}`;
-            
+
             const warningLevel = Math.min(student.warnings || 0, 3);
             const warningClass = `warning-${warningLevel}`;
-            
+
             const durationText = formatDuration(student);
-            
+
             card.innerHTML = `
                 <div class="student-header ${warningClass}">
                     <span class="student-name">${student.student_name}</span>
                     <span class="student-status">
-                        ${warningLevel === 0 ? '✅ Safe' : 
-                          warningLevel === 1 ? '⚠️ Watch' : 
-                          warningLevel === 2 ? '🚨 Alert' : '❌ Critical'}
+                        ${warningLevel === 0 ? '✅ Safe' :
+                    warningLevel === 1 ? '⚠️ Watch' :
+                        warningLevel === 2 ? '🚨 Alert' : '❌ Critical'}
                     </span>
                 </div>
-                <div class="video-container">
+                <div class="video-container" style="position:relative;">
                     <div class="warning-pill ${warningClass}">${Math.min(student.warnings || 0, 3)}/3</div>
-                    <img class="live-feed" data-mode="mjpeg" src="/admin/live/${student.student_id}" alt="Live Feed">
+                    <!-- Legacy Fallback Image (z-index 1) -->
+                    <img class="live-feed" data-mode="mjpeg" src="/admin/live/${student.student_id}" alt="Live Feed" style="position:relative; z-index:1;">
+                    <!-- WebRTC Live P2P Stream (z-index 2) overlaying the legacy post -->
+                    <video class="live-feed" id="video-${student.student_id}" autoplay playsinline muted style="position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; z-index:2; display:none; background:#000;"></video>
                 </div>
                 <div class="student-info">
                     <div class="info-row">
@@ -836,7 +924,7 @@
                     </button>
                 </div>
             `;
-            
+
             return card;
         }
 
@@ -845,7 +933,7 @@
             if (card && frameData) {
                 const videoContainer = card.querySelector('.video-container');
                 const currentImg = videoContainer.querySelector('img.live-feed');
-                
+
                 if (currentImg) {
                     currentImg.src = 'data:image/jpeg;base64,' + frameData;
                     currentImg.removeAttribute('data-mode'); // Clear legacy mjpeg mode if present
@@ -881,38 +969,48 @@
 
         function viewLiveFeed(studentId, studentName) {
             currentStreamingStudent = studentId;
-            
+
             document.getElementById('modal-student-name').textContent = `${studentName} - Live Feed`;
             document.getElementById('modal-live-feed').style.display = 'none';
             document.getElementById('modal-loading').style.display = 'block';
             document.getElementById('modal-loading').innerHTML = '🔄 Starting live feed...';
-            
+
             // Update violations list
             updateModalViolations(studentId);
-            
-            // Show modal
-            document.getElementById('live-feed-modal').style.display = 'flex';
 
-            // Prefer Flask MJPEG route for stable continuous streaming.
+            // Show modal and reset WebRTC overlay
+            document.getElementById('live-feed-modal').style.display = 'flex';
+            const modalWebrtcFeed = document.getElementById('modal-webrtc-feed');
+            if (modalWebrtcFeed) modalWebrtcFeed.style.display = 'none';
+
+            // Prefer Flask MJPEG route for stable continuous streaming fallback.
             const modalFeed = document.getElementById('modal-live-feed');
             modalFeed.src = `/admin/live/${studentId}`;
-            modalFeed.onload = function() {
-                document.getElementById('modal-loading').style.display = 'none';
-                modalFeed.style.display = 'block';
+            modalFeed.onload = function () {
+                // If WebRTC is already overriding, don't hide the loader since WebRTC handles it
+                if (modalWebrtcFeed.style.display !== 'block') {
+                    document.getElementById('modal-loading').style.display = 'none';
+                    modalFeed.style.display = 'block';
+                }
             };
-            modalFeed.onerror = function() {
-                document.getElementById('modal-loading').style.display = 'block';
-                document.getElementById('modal-loading').innerHTML = 'Live stream unavailable. Retrying...';
+            modalFeed.onerror = function () {
+                if (modalWebrtcFeed.style.display !== 'block') {
+                    document.getElementById('modal-loading').style.display = 'block';
+                    document.getElementById('modal-loading').innerHTML = 'Live stream unavailable. Retrying...';
+                }
             };
 
+            // Send WebRTC Request to the student to initiate P2P high-quality feed
+            socket.emit('request_webrtc_stream', { student_id: studentId });
+
             // Keep socket request as a secondary path/fallback.
-            socket.emit('request_student_feed', {student_id: studentId});
+            socket.emit('request_student_feed', { student_id: studentId });
         }
 
         function updateModalViolations(studentId) {
             const violationsContainer = document.getElementById('modal-violations');
             const student = studentsData[studentId];
-            
+
             if (student && student.violations && student.violations.length > 0) {
                 violationsContainer.innerHTML = student.violations.slice(-5).reverse().map(violation => `
                     <div class="violation-item">
@@ -929,6 +1027,13 @@
         function closeLiveFeed() {
             const modalFeed = document.getElementById('modal-live-feed');
             modalFeed.src = '';
+
+            const modalWebrtcFeed = document.getElementById('modal-webrtc-feed');
+            if (modalWebrtcFeed) {
+                modalWebrtcFeed.srcObject = null;
+                modalWebrtcFeed.style.display = 'none';
+            }
+
             document.getElementById('live-feed-modal').style.display = 'none';
             currentStreamingStudent = null;
         }
@@ -951,7 +1056,7 @@
             alert.className = `alert ${type}`;
             alert.textContent = message;
             document.body.appendChild(alert);
-            
+
             setTimeout(() => {
                 alert.remove();
             }, 5000);
@@ -961,13 +1066,13 @@
         setInterval(() => {
             document.querySelectorAll('.student-card').forEach(card => {
                 const sidText = card.id.replace('student-', '');
-            const key = String(sidText);
-            if (!studentsData[key] || !studentsData[key].startTime) return;
-            const durationEl = card.querySelector('.info-row:last-child .info-value');
-            if (durationEl) {
-                durationEl.textContent = formatDuration(studentsData[key]);
-            }
-        });
+                const key = String(sidText);
+                if (!studentsData[key] || !studentsData[key].startTime) return;
+                const durationEl = card.querySelector('.info-row:last-child .info-value');
+                if (durationEl) {
+                    durationEl.textContent = formatDuration(studentsData[key]);
+                }
+            });
             updateDashboard(false);
         }, 1000);
 
@@ -1015,7 +1120,7 @@
                     });
                     if (changed) updateDashboard();
                 })
-                .catch(() => {});
+                .catch(() => { });
         }
         setInterval(pollLiveWarnings, 3000);  // Poll every 3 seconds
         setInterval(syncActiveStudents, 2000); // Poll active students every 2 seconds
@@ -1035,7 +1140,7 @@
         }, 30000);
 
         // Close modal on escape key
-        document.addEventListener('keydown', function(e) {
+        document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') {
                 closeLiveFeed();
             }
@@ -1045,4 +1150,5 @@
         console.log('📊 Waiting for student connections...');
     </script>
 </body>
+
 </html>

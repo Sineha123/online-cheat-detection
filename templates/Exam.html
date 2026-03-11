@@ -14,6 +14,11 @@
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     {% endif %}
 
+    <!-- TensorFlow.js and Models -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
+
     <title>Online CheatBuster - Exam</title>
 
     <style>
@@ -918,9 +923,25 @@
                             <h5 style="color: rgb(29, 27, 27); margin-bottom: 10px; font-size: 16px;">
                                 <i class="fas fa-shield-alt me-2"></i>Proctoring System Active
                             </h5>
-                            <p style="color: rgba(255, 255, 255, 0.8); font-size: 14px; margin: 0;">
+                            <p
+                                style="color: rgba(255, 255, 255, 0.8); font-size: 14px; margin: 0; margin-bottom: 15px;">
                                 Your exam session will be monitored for academic integrity.
                             </p>
+                            <!-- Real-time Suspicion Score UI -->
+                            <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 10px;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                    <span style="color: #fff; font-size: 12px; font-weight: bold;"><i
+                                            class="fas fa-microchip me-1"></i> Local AI Analysis:</span>
+                                    <span id="suspicion-score-text"
+                                        style="color: #10b981; font-size: 12px; font-weight: bold;">Score: 0</span>
+                                </div>
+                                <div
+                                    style="height: 8px; background: rgba(255,255,255,0.3); border-radius: 4px; overflow: hidden;">
+                                    <div id="suspicion-score-bar"
+                                        style="height: 100%; width: 0%; background: #10b981; transition: width 0.3s, background-color 0.3s;">
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         <div id="faceVerifyStatus" style="display:none; margin-bottom:12px; font-weight:600;"></div>
@@ -1153,7 +1174,7 @@
         const studentId = "{{ student_id|default(0) }}";
         const studentName = "{{ student_name|default('Student') }}";
         const CSRF_TOKEN = "{{ csrf_token() }}";
-        const hasProfile = {{ student_profile|default (false) | tojson | lower }};
+        const hasProfile = ("{{ student_profile|default(false)|string|lower }}" === "true");
 
         // ============================================
         // FIXED SUBJECT DISTRIBUTION: 25 QUESTIONS PER SUBJECT
@@ -1789,7 +1810,7 @@
     <!-- ENHANCED MONITORING AND WARNING SYSTEM -->
     <script>
         const MAX_WARNINGS = 3;
-        const MONITORING_ENABLED = {{ monitoring_enabled|default (true) | tojson | lower }};
+        const MONITORING_ENABLED = ("{{ monitoring_enabled|default(true)|string|lower }}" === "true");
 
         const warningSystem = {
             currentWarnings: 0,
@@ -1844,9 +1865,71 @@
                     this.socket.on('student_violation', (data) => this.addWarning(data));
                     this.socket.on('warnings_cleared', () => this.clearWarnings());
                     this.socket.on('exam_terminated', (data) => this.terminateExam(data.reason));
+
+                    // WebRTC P2P Relays
+                    this.socket.on('request_webrtc_stream', () => {
+                        if (window.remoteFrameUploader && remoteFrameUploader.stream) {
+                            this.initWebRTC(remoteFrameUploader.stream);
+                        }
+                    });
+                    this.socket.on('webrtc_answer', async (data) => {
+                        if (this.webrtcPeerConnection && data.answer) {
+                            try {
+                                await this.webrtcPeerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                            } catch (err) { console.error('WebRTC answer error:', err); }
+                        }
+                    });
+                    this.socket.on('webrtc_ice_candidate', async (data) => {
+                        if (this.webrtcPeerConnection && data.candidate) {
+                            try {
+                                await this.webrtcPeerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                            } catch (err) { console.error('WebRTC ice error:', err); }
+                        }
+                    });
                 } catch (error) {
                     console.log('SocketIO initialization failed:', error);
                 }
+            },
+
+            webrtcPeerConnection: null,
+
+            initWebRTC(stream) {
+                if (this.webrtcPeerConnection) {
+                    this.webrtcPeerConnection.close();
+                }
+                this.webrtcPeerConnection = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+
+                if (stream) {
+                    stream.getTracks().forEach(track => {
+                        this.webrtcPeerConnection.addTrack(track, stream);
+                    });
+                }
+
+                this.webrtcPeerConnection.onicecandidate = (event) => {
+                    if (event.candidate && this.socket) {
+                        this.socket.emit('webrtc_ice_candidate', {
+                            student_id: studentId,
+                            candidate: event.candidate
+                        });
+                    }
+                };
+
+                this.webrtcPeerConnection.onnegotiationneeded = async () => {
+                    try {
+                        const offer = await this.webrtcPeerConnection.createOffer();
+                        await this.webrtcPeerConnection.setLocalDescription(offer);
+                        if (this.socket) {
+                            this.socket.emit('webrtc_offer', {
+                                student_id: studentId,
+                                offer: this.webrtcPeerConnection.localDescription
+                            });
+                        }
+                    } catch (err) {
+                        console.error('WebRTC offer error:', err);
+                    }
+                };
             },
 
             startWarningSync() {
@@ -2352,7 +2435,7 @@
             rafId: null,
             running: false,
             inFlight: false,
-            targetFps: 15,
+            targetFps: 10,
             lastSentAt: 0,
             lastHealthAt: 0,
             darkFrameStreak: 0,
@@ -2361,6 +2444,90 @@
             noFrameSince: 0,
             cameraWarnCooldownUntil: 0,
             initAttempts: 0,
+
+            // New TFJS properties
+            tfModelsLoaded: false,
+            cocoModel: null,
+            faceModel: null,
+            suspicionScore: 0,
+            consecutiveMissingFace: 0,
+
+            async initModels() {
+                try {
+                    console.log("[TFJS] Loading client-side WASM models...");
+                    this.cocoModel = await cocoSsd.load();
+                    this.faceModel = await blazeface.load();
+                    this.tfModelsLoaded = true;
+                    console.log("[TFJS] Models loaded successfully!");
+                } catch (e) {
+                    console.error("[TFJS] Error loading models:", e);
+                }
+            },
+
+            async runLocalInference(canvasEl) {
+                if (!this.tfModelsLoaded || !this.cocoModel || !this.faceModel) return;
+                try {
+                    let newScore = 0;
+
+                    // 1. Detect faces (BlazeFace)
+                    const faces = await this.faceModel.estimateFaces(canvasEl, false);
+                    if (faces.length === 0) {
+                        this.consecutiveMissingFace++;
+                        if (this.consecutiveMissingFace > 5) newScore += 40; // No face penalty
+                    } else if (faces.length > 1) {
+                        this.consecutiveMissingFace = 0;
+                        newScore += 50; // Multiple faces penalty
+                    } else {
+                        this.consecutiveMissingFace = 0;
+                    }
+
+                    // 2. Detect objects (COCO-SSD)
+                    let cellPhoneDetected = false;
+                    let laptopDetected = false;
+
+                    if (newScore < 100) {
+                        const predictions = await this.cocoModel.detect(canvasEl);
+                        predictions.forEach(pred => {
+                            const className = pred.class.toLowerCase();
+                            if (className === 'cell phone') { cellPhoneDetected = true; newScore += 80; }
+                            if (className === 'laptop') { laptopDetected = true; newScore += 40; }
+                            if (className === 'book') { newScore += 30; }
+                        });
+                    }
+
+                    this.suspicionScore = Math.min(100, newScore);
+
+                    // 3. Update local UI
+                    const scoreText = document.getElementById('suspicion-score-text');
+                    const scoreBar = document.getElementById('suspicion-score-bar');
+                    if (scoreText) scoreText.innerText = `Score: ${this.suspicionScore}`;
+                    if (scoreBar) {
+                        scoreBar.style.width = `${this.suspicionScore}%`;
+                        if (this.suspicionScore > 50) {
+                            scoreBar.style.backgroundColor = '#e60b0b';
+                            scoreText.style.color = '#e60b0b';
+                        } else if (this.suspicionScore > 20) {
+                            scoreBar.style.backgroundColor = '#f59e0b';
+                            scoreText.style.color = '#f59e0b';
+                        } else {
+                            scoreBar.style.backgroundColor = '#10b981';
+                            scoreText.style.color = '#10b981';
+                        }
+                    }
+
+                    // 4. Send Telemetry to Server via WebSockets
+                    if (typeof warningSystem !== 'undefined' && warningSystem.socket && typeof studentId !== 'undefined') {
+                        warningSystem.socket.emit('telemetry_update', {
+                            student_id: studentId,
+                            score: this.suspicionScore,
+                            faces: faces.length,
+                            objects: { phone: cellPhoneDetected, laptop: laptopDetected }
+                        });
+                    }
+                } catch (e) {
+                    console.error("[TFJS] Inference failed:", e);
+                }
+            },
 
             warnCamera(type, details) {
                 const now = Date.now();
@@ -2377,6 +2544,10 @@
             async init() {
                 const oldTrack = this.stream && this.stream.getVideoTracks ? this.stream.getVideoTracks()[0] : null;
                 if (this.stream && this.video && oldTrack && oldTrack.readyState === 'live') return true;
+
+                if (!this.tfModelsLoaded) {
+                    await this.initModels();
+                }
 
                 if (!navigator.mediaDevices) {
                     throw new Error("Camera access blocked by browser. You must access this site via 'http://127.0.0.1:5001' or 'http://localhost:5001' (or use HTTPS).");
@@ -2450,6 +2621,12 @@
                     }
                     this.running = true;
                     this.initAttempts = 0;
+
+                    // Initialize WebRTC P2P once the stream is ready
+                    if (window.warningSystem && warningSystem.socket) {
+                        warningSystem.initWebRTC(this.stream);
+                    }
+
                     this.startLoop();
                     return true;
                 } catch (e) {
@@ -2539,9 +2716,18 @@
                         }
                         const frameInterval = 1000 / Math.max(4, Number(this.targetFps) || 12);
                         if (!this.inFlight && ((nowTs - this.lastSentAt) >= frameInterval)) {
-                            const imageData = this.canvas.toDataURL('image/jpeg', 0.68);
                             this.inFlight = true;
                             this.lastSentAt = nowTs;
+                            this.runLocalInference(this.canvas).finally(() => {
+                                this.inFlight = false;
+                            });
+                        }
+
+                        // Concurrent slow POST for Admin Panel Video CCTV (approx 1 FPS)
+                        if (!this.inFlightPost && ((nowTs - (this.lastPostAt || 0)) >= 1000)) {
+                            this.inFlightPost = true;
+                            this.lastPostAt = nowTs;
+                            const imageData = this.canvas.toDataURL('image/jpeg', 0.68);
                             const controller = new AbortController();
                             const timeout = setTimeout(() => controller.abort(), 900);
                             fetch('/api/student-frame', {
@@ -2553,22 +2739,10 @@
                                 },
                                 body: JSON.stringify({ image_data: imageData, student_id: studentId }),
                                 signal: controller.signal
-                            })
-                                .then(async (res) => {
-                                    if (res.status === 401 || res.status === 403) {
-                                        this.warnCamera('CAMERA_OFF', `Frame API auth failed (${res.status})`);
-                                        return;
-                                    }
-                                    if (!res.ok) {
-                                        const txt = await res.text().catch(() => '');
-                                        console.log('student-frame upload failed:', res.status, txt);
-                                    }
-                                })
-                                .catch(() => { })
-                                .finally(() => {
-                                    clearTimeout(timeout);
-                                    this.inFlight = false;
-                                });
+                            }).finally(() => {
+                                clearTimeout(timeout);
+                                this.inFlightPost = false;
+                            });
                         }
                     } catch (_) { }
                     this.rafId = requestAnimationFrame(step);
