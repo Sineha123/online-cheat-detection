@@ -408,6 +408,51 @@
         .violations-container {
             flex: 1;
             min-width: 250px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .telemetry-comparison {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #eee;
+            margin-top: 15px;
+        }
+
+        .telemetry-tables {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        .telemetry-table {
+            flex: 1;
+            font-size: 12px;
+            background: white;
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid #ddd;
+        }
+
+        .telemetry-table-header {
+            background: #667eea;
+            color: white;
+            padding: 5px 10px;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .telemetry-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 10px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .telemetry-row:last-child {
+            border-bottom: none;
         }
 
         .loading {
@@ -435,6 +480,11 @@
             color: #f44336;
             border: 1px solid #f44336;
         }
+
+        /* ── Admin Telemetry Log Panel ── */
+        .admin-log-panel { background:#0f0d23; max-height:220px; overflow-y:auto; border-radius:8px; padding:8px 10px; margin-top:12px; scrollbar-width:thin; scrollbar-color:#4338ca #0f0d23; }
+        .admin-log-panel .al { font-size:10.5px; font-family:'SF Mono',Consolas,monospace; line-height:1.4; padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04); color:#a5b4fc; white-space:pre-wrap; word-break:break-word; }
+        .admin-log-panel .al.info { color:#7dd3fc; } .al.warn { color:#fbbf24; } .al.err { color:#f87171; } .al.tele { color:#c084fc; }
     </style>
 </head>
 
@@ -507,10 +557,39 @@
                         🔄 Loading live feed...
                     </div>
                 </div>
+                </div>
                 <div class="violations-container">
-                    <h3>Recent Violations</h3>
-                    <div class="violations-list" id="modal-violations">
-                        <div class="loading">No violations detected</div>
+                    <div>
+                        <h3>Recent Violations</h3>
+                        <div class="violations-list" id="modal-violations">
+                            <div class="loading">No violations detected</div>
+                        </div>
+                    </div>
+                    
+                    <div class="telemetry-comparison" id="modal-telemetry-panel" style="display:none;">
+                        <h3>Telemetry Comparison (WASM)</h3>
+                        <div class="telemetry-tables">
+                            <div class="telemetry-table">
+                                <div class="telemetry-table-header">Student Reported</div>
+                                <div class="telemetry-row"><span>Suspicion:</span><span id="tel-student-suspicion">--</span></div>
+                                <div class="telemetry-row"><span>Faces:</span><span id="tel-student-faces">--</span></div>
+                                <div class="telemetry-row"><span>Phone:</span><span id="tel-student-phone">--</span></div>
+                                <div class="telemetry-row"><span>Tab/Vis:</span><span id="tel-student-vis">--</span></div>
+                            </div>
+                            <div class="telemetry-table">
+                                <div class="telemetry-table-header">Admin Verified</div>
+                                <div class="telemetry-row"><span>Suspicion:</span><span id="tel-admin-suspicion">--</span></div>
+                                <div class="telemetry-row"><span>Faces:</span><span id="tel-admin-faces">--</span></div>
+                                <div class="telemetry-row"><span>Phone:</span><span id="tel-admin-phone">--</span></div>
+                                <div class="telemetry-row"><span>Mismatch:</span><span id="tel-admin-mismatch" style="font-weight:bold; color:#f44336;">--</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Real-time Telemetry Log -->
+                    <div style="margin-top:12px;">
+                        <h3 style="display:flex;align-items:center;gap:8px;">🔬 Live Inference Log <span style="font-size:11px;color:#888;font-weight:400;">streams from student engine</span></h3>
+                        <div class="admin-log-panel" id="modal-telemetry-log"></div>
                     </div>
                 </div>
             </div>
@@ -527,12 +606,23 @@
             reconnectionDelayMax: 3000,
             timeout: 8000
         });
+        const CSRF_TOKEN = "{{ csrf_token() }}";
 
         let studentsData = {};
         let totalWarnings = 0;
         let terminatedExams = 0;
         let currentStreamingStudent = null;
         let pollHealthyUntil = 0;
+        const telemetryV2ByStudent = new Map();
+        const webrtcRequestAt = new Map();
+        let adminVerifier = null;
+        let verifierBooting = false;
+
+        const ADMIN_VERIFY_WORKERS = 3;
+        const ADMIN_VERIFY_CHECKS_PER_SEC = 9;
+        const ADMIN_VERIFY_WINDOW = 4;
+        const ADMIN_VERIFY_HIGH_THRESHOLD = 58;
+        const ADMIN_VERIFY_FLAG_COOLDOWN_SEC = 120;
 
         // --- Navigation Functions ---
         function goBack() {
@@ -557,6 +647,7 @@
             // Request initial student list
             socket.emit('request_all_feeds');
             syncActiveStudents();
+            ensureAdminVerifierStarted();
         });
 
         socket.on('disconnect', function () {
@@ -577,6 +668,133 @@
         socket.on('connection_response', function (data) {
             console.log('Server connection confirmed:', data);
         });
+
+        socket.on('student_telemetry_v2', function (data) {
+            const sid = String(data.student_id || '');
+            if (!sid) return;
+
+            const history = telemetryV2ByStudent.get(sid) || [];
+            history.push(data);
+            while (history.length > 300) history.shift();
+            telemetryV2ByStudent.set(sid, history);
+
+            let created = false;
+            if (!studentsData[sid]) {
+                studentsData[sid] = {
+                    student_id: sid,
+                    student_name: `Student ${sid}`,
+                    warnings: 0,
+                    violations: [],
+                    startTime: Date.now(),
+                    endTime: null,
+                    lastFrame: null,
+                    lastUpdate: Date.now()
+                };
+                created = true;
+            }
+            studentsData[sid].lastUpdate = Date.now();
+            studentsData[sid].suspicion_score = Number(data.analysis?.suspicion_score ?? 0);
+            studentsData[sid].safety_level = Number(data.analysis?.safety_level ?? 0);
+            studentsData[sid].verdict = data.analysis?.verdict || 'GOOD_TO_GO';
+            studentsData[sid].integrity_verified = Boolean(data.engine?.integrity_verified);
+            studentsData[sid].last_telemetry_ms = Number(data.timestamp_ms || Date.now());
+            // Store object detection data for card display
+            studentsData[sid].banned_labels = Array.isArray(data.metrics?.banned_labels) ? data.metrics.banned_labels : [];
+            studentsData[sid].active_flags = Array.isArray(data.analysis?.active_flags) ? data.analysis.active_flags : [];
+            studentsData[sid].face_count = data.metrics?.face_count ?? null;
+            studentsData[sid].person_count = data.metrics?.person_count ?? null;
+
+            if (created) {
+                updateDashboard(true);
+            } else {
+                refreshStudentTelemetryRow(sid);
+            }
+
+            // If this is the currently viewed student, update the modal panel
+            if (currentStreamingStudent == sid) {
+                updateModalTelemetry(sid, data);
+            }
+        });
+
+        socket.on('tamper_review_flagged', function (data) {
+            const sid = String(data.student_id || '');
+            if (!sid) return;
+            if (!studentsData[sid]) return;
+            studentsData[sid].tamperFlagged = true;
+            studentsData[sid].tamperMismatch = data.mismatch_score;
+            updateDashboard(true);
+            showAlert(`🛡️ Tamper review flag: ${studentsData[sid].student_name} (score ${data.mismatch_score})`, 'warning');
+        });
+
+        async function ensureAdminVerifierStarted() {
+            if (adminVerifier || verifierBooting) return;
+            verifierBooting = true;
+            try {
+                const mod = await import('/static/proctor_engine/runtime/admin_verifier.js');
+                const AdminTamperVerifier = mod.AdminTamperVerifier;
+                adminVerifier = new AdminTamperVerifier({
+                    workers: ADMIN_VERIFY_WORKERS,
+                    checksPerSecond: ADMIN_VERIFY_CHECKS_PER_SEC,
+                    windowSize: ADMIN_VERIFY_WINDOW,
+                    highThreshold: ADMIN_VERIFY_HIGH_THRESHOLD,
+                    cooldownSec: ADMIN_VERIFY_FLAG_COOLDOWN_SEC
+                });
+                await adminVerifier.init();
+                adminVerifier.start({
+                    getActiveStudentIds: () => Object.keys(studentsData).map(String),
+                    getVideoElement: (studentId) => {
+                        const video = document.getElementById(`video-${studentId}`);
+                        if (!video || video.tagName !== 'VIDEO') return null;
+                        const v = video;
+                        if (!v.srcObject || v.readyState < 2 || !v.videoWidth || !v.videoHeight) {
+                            const now = Date.now();
+                            const lastReq = Number(webrtcRequestAt.get(String(studentId)) || 0);
+                            if (now - lastReq > 5000) {
+                                webrtcRequestAt.set(String(studentId), now);
+                                socket.emit('request_webrtc_stream', { student_id: String(studentId) });
+                            }
+                            return null;
+                        }
+                        return v;
+                    },
+                    getTelemetryHistory: (studentId) => telemetryV2ByStudent.get(String(studentId)) || [],
+                    onFlag: async (payload) => {
+                        try {
+                            const resp = await fetch('/api/admin/tamper-flag', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-CSRF-Token': CSRF_TOKEN
+                                },
+                                body: JSON.stringify(payload)
+                            });
+                            if (!resp.ok) {
+                                throw new Error(`tamper-flag failed (${resp.status})`);
+                            }
+                        } catch (err) {
+                            console.error('tamper flag post failed', err);
+                        }
+                    },
+                    onLocalTelemetry: (studentId, localTel, mismatchScore) => {
+                        if (currentStreamingStudent == studentId) {
+                            document.getElementById('tel-admin-suspicion').textContent = Math.round((localTel.suspicionScore || 0) * 100) + '%';
+                            document.getElementById('tel-admin-faces').textContent = localTel.faceCount || 0;
+                            document.getElementById('tel-admin-phone').textContent = localTel.phoneDetected ? 'Yes' : 'No';
+                            
+                            const mismatchEl = document.getElementById('tel-admin-mismatch');
+                            const mScore = Math.round((mismatchScore || 0) * 100);
+                            mismatchEl.textContent = mScore + '%';
+                            mismatchEl.style.color = mScore > 50 ? '#f44336' : (mScore > 20 ? '#ff9800' : '#4caf50');
+                        }
+                    }
+                });
+                console.log('[Verifier] started');
+            } catch (err) {
+                console.error('Failed to start admin verifier', err);
+            } finally {
+                verifierBooting = false;
+            }
+        }
 
         // --- WebRTC Peer-to-Peer System ---
         const peerConnections = {};
@@ -719,23 +937,32 @@
             showAlert(`⚠️ ${data.student_name}: ${violationType} (Warning ${data.total_warnings}/3)`);
         });
 
-        // Handle live video frames
+        // Handle live video frames (socket relay from student)
         socket.on('student_frame', function (data) {
-            console.log('📹 Received frame for student:', data.student_id);
             const key = String(data.student_id);
 
-            // Update student data with frame
-            if (studentsData[key]) {
-                if (!studentsData[key].startTime) {
-                    studentsData[key].startTime = Date.now(); // start duration when first frame arrives
-                }
-                studentsData[key].lastFrame = data.frame;
-                studentsData[key].lastUpdate = Date.now();
+            // Create student entry if doesn't exist (from frame before sync)
+            if (!studentsData[key]) {
+                studentsData[key] = {
+                    student_id: key,
+                    student_name: `Student ${key}`,
+                    warnings: 0, violations: [],
+                    startTime: Date.now(), endTime: null,
+                    lastFrame: null, lastUpdate: Date.now()
+                };
+                updateDashboard(true);
+            }
 
-                // Update mini feed in student card
-                updateStudentCardFrame(key, data.frame);
+            studentsData[key].lastFrame = data.frame;
+            studentsData[key].lastUpdate = Date.now();
+            if (!studentsData[key].startTime) studentsData[key].startTime = Date.now();
 
-                // Modal uses dedicated MJPEG route; do not override with socket frame.
+            // Update mini feed in student card
+            updateStudentCardFrame(key, data.frame);
+
+            // Also update modal if viewing this student
+            if (currentStreamingStudent == key && data.frame) {
+                updateModalFrame(data.frame);
             }
         });
 
@@ -809,7 +1036,7 @@
                     }
                     let structureChanged = false;
                     list.forEach(student => {
-                        const sid = Number(student.student_id);
+                        const sid = String(student.student_id);
                         if (!studentsData[sid]) {
                             structureChanged = true;
                             studentsData[sid] = {
@@ -830,6 +1057,9 @@
                         }
                     });
                     updateDashboard(structureChanged);
+                    if (!structureChanged) {
+                        Object.keys(studentsData).forEach((sid) => refreshStudentTelemetryRow(String(sid)));
+                    }
                 })
                 .catch(() => {
                     if (!socket.connected && Date.now() > pollHealthyUntil) {
@@ -865,6 +1095,15 @@
 
             const warningLevel = Math.min(student.warnings || 0, 3);
             const warningClass = `warning-${warningLevel}`;
+            const safetyLevel = (student.safety_level === null || student.safety_level === undefined) ? '--' : `${student.safety_level}`;
+            const suspicionScore = (student.suspicion_score === null || student.suspicion_score === undefined) ? '--' : `${student.suspicion_score}`;
+            const verdict = student.verdict || '--';
+            const integrity = (student.integrity_verified === null || student.integrity_verified === undefined)
+                ? '--'
+                : (student.integrity_verified ? 'OK' : 'FAIL');
+            const tamperBadge = student.tamperFlagged
+                ? `<div class="warning-pill warning-3" style="left:10px; right:auto;">🛡️ Tamper ${student.tamperMismatch || ''}</div>`
+                : '';
 
             const durationText = formatDuration(student);
 
@@ -877,8 +1116,10 @@
                         warningLevel === 2 ? '🚨 Alert' : '❌ Critical'}
                     </span>
                 </div>
+                <div id="objects-${student.student_id}" class="detected-objects" style="padding:4px 12px; font-size:12px; font-weight:600; color:#f87171; background:rgba(248,113,113,0.08); min-height:0; line-height:1.4;"></div>
                 <div class="video-container" style="position:relative;">
                     <div class="warning-pill ${warningClass}">${Math.min(student.warnings || 0, 3)}/3</div>
+                    ${tamperBadge}
                     <!-- Legacy Fallback Image (z-index 1) -->
                     <img class="live-feed" data-mode="mjpeg" src="/admin/live/${student.student_id}" alt="Live Feed" style="position:relative; z-index:1;">
                     <!-- WebRTC Live P2P Stream (z-index 2) overlaying the legacy post -->
@@ -903,6 +1144,14 @@
                         <span class="info-label">Duration:</span>
                         <span class="info-value">${durationText}</span>
                     </div>
+                    <div class="info-row">
+                        <span class="info-label">Suspicion/Safety:</span>
+                        <span class="info-value" id="telemetry-${student.student_id}">${suspicionScore} / ${safetyLevel}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Verdict/Integrity:</span>
+                        <span class="info-value" id="integrity-${student.student_id}">${verdict} / ${integrity}</span>
+                    </div>
                 </div>
                 ${student.violations && student.violations.length > 0 ? `
                     <div class="violations-list">
@@ -915,9 +1164,13 @@
                         `).join('')}
                     </div>
                 ` : ''}
+
                 <div class="action-buttons">
                     <button class="btn btn-view" onclick="viewLiveFeed(${student.student_id}, '${student.student_name}')">
                         📹 View Live
+                    </button>
+                    <button class="btn" style="background:#6366f1;color:#fff;" onclick="verifyTamper('${student.student_id}', '${student.student_name}')">
+                        🛡️ Verify
                     </button>
                     <button class="btn btn-terminate" onclick="terminateExam(${student.student_id}, '${student.student_name}')">
                         ❌ Terminate
@@ -926,6 +1179,57 @@
             `;
 
             return card;
+        }
+
+        function refreshStudentTelemetryRow(studentId) {
+            const sid = String(studentId);
+            const student = studentsData[sid];
+            if (!student) return;
+
+            const score = student.suspicion_score ?? 0;
+
+            const telemetryEl = document.getElementById(`telemetry-${sid}`);
+            if (telemetryEl) {
+                const suspicion = (student.suspicion_score === null || student.suspicion_score === undefined) ? '--' : student.suspicion_score;
+                const safety = (student.safety_level === null || student.safety_level === undefined) ? '--' : student.safety_level;
+                telemetryEl.textContent = `${suspicion} / ${safety}`;
+            }
+
+            const integrityEl = document.getElementById(`integrity-${sid}`);
+            if (integrityEl) {
+                const verdict = student.verdict || '--';
+                const integrity = (student.integrity_verified === null || student.integrity_verified === undefined)
+                    ? '--'
+                    : (student.integrity_verified ? 'OK' : 'FAIL');
+                integrityEl.textContent = `${verdict} / ${integrity}`;
+            }
+
+            // Update card badge color based on score
+            const card = document.getElementById(`student-${sid}`);
+            if (card) {
+                const header = card.querySelector('.student-header');
+                const statusEl = card.querySelector('.student-status');
+                if (header) {
+                    header.className = 'student-header ' + (score < 30 ? 'warning-0' : score < 60 ? 'warning-1' : score < 80 ? 'warning-2' : 'warning-3');
+                }
+                if (statusEl) {
+                    statusEl.textContent = score < 30 ? '✅ Safe' : score < 60 ? '⚠️ Watch' : score < 80 ? '🚨 Alert' : '❌ Critical';
+                }
+            }
+
+            // Show detected objects
+            const objectsEl = document.getElementById(`objects-${sid}`);
+            if (objectsEl) {
+                const banned = student.banned_labels || [];
+                const flags = student.active_flags || [];
+                const parts = [];
+                if (banned.length > 0) parts.push(`🚫 ${banned.join(', ')}`);
+                if (flags.length > 0) parts.push(`🚩 ${flags.join(', ')}`);
+                if (student.face_count > 1) parts.push(`👥 ${student.face_count} faces`);
+                if (student.face_count === 0) parts.push('⚠️ No face');
+                objectsEl.innerHTML = parts.length > 0 ? parts.join(' │ ') : '';
+                objectsEl.style.color = parts.length > 0 ? '#f87171' : '#6ee7b7';
+            }
         }
 
         function updateStudentCardFrame(studentId, frameData) {
@@ -982,6 +1286,17 @@
             document.getElementById('live-feed-modal').style.display = 'flex';
             const modalWebrtcFeed = document.getElementById('modal-webrtc-feed');
             if (modalWebrtcFeed) modalWebrtcFeed.style.display = 'none';
+            document.getElementById('modal-telemetry-panel').style.display = 'block';
+
+            // Reset UI Telemetry placeholders
+            document.getElementById('tel-student-suspicion').textContent = '--';
+            document.getElementById('tel-student-faces').textContent = '--';
+            document.getElementById('tel-student-phone').textContent = '--';
+            document.getElementById('tel-student-vis').textContent = '--';
+            document.getElementById('tel-admin-suspicion').textContent = '--';
+            document.getElementById('tel-admin-faces').textContent = '--';
+            document.getElementById('tel-admin-phone').textContent = '--';
+            document.getElementById('tel-admin-mismatch').textContent = '--';
 
             // Prefer Flask MJPEG route for stable continuous streaming fallback.
             const modalFeed = document.getElementById('modal-live-feed');
@@ -1024,6 +1339,158 @@
             }
         }
 
+        function updateModalTelemetry(studentId, telemetryData) {
+            const analysis = telemetryData.analysis || {};
+            const metrics = telemetryData.metrics || {};
+            const perf = telemetryData.perf || {};
+            const env = telemetryData.engine?.environment || {};
+            const score = Number(analysis.suspicion_score || 0);
+
+            document.getElementById('tel-student-suspicion').textContent = score;
+            document.getElementById('tel-student-faces').textContent = metrics.face_count ?? '--';
+            const banned = Array.isArray(metrics.banned_labels) ? metrics.banned_labels : [];
+            document.getElementById('tel-student-phone').textContent = banned.length > 0 ? banned.join(', ') : 'No';
+            const vis = env.is_visible ? 'Visible' : 'Hidden';
+            const focus = env.has_focus ? 'Focused' : 'Blurred';
+            document.getElementById('tel-student-vis').textContent = `${vis}/${focus}`;
+
+            // Panel visible
+            document.getElementById('modal-telemetry-panel').style.display = 'block';
+
+            // ── Append to live log ──
+            const logPanel = document.getElementById('modal-telemetry-log');
+            if (logPanel) {
+                const sn = (v,d) => v!=null&&typeof v==='number'?v.toFixed(d):'-';
+                const lvl = score < 30 ? 'tele' : score < 60 ? 'warn' : 'err';
+                const flags = Array.isArray(analysis.active_flags) ? analysis.active_flags : [];
+
+                const lines = [
+                    `<b>#${telemetryData.frame_id||'?'}</b> │ ${analysis.verdict||'-'} │ Score: <b>${score}</b>`,
+                    `  👤 Faces:${metrics.face_count??'-'} Persons:${metrics.person_count??'-'} │ Yaw:${sn(metrics.yaw_deg,1)}° Pitch:${sn(metrics.pitch_deg,1)}° Roll:${sn(metrics.roll_deg,1)}°`,
+                    `  👁 EAR:${sn(metrics.ear_mean,3)} GazeOff:${sn(metrics.gaze_offset,2)} │ 💡Light:${sn(metrics.lighting_score,2)} │ ⏱${sn(perf.infer_ms,0)}ms`,
+                ];
+                if (flags.length > 0) lines.push(`  🚩 [${flags.join(', ')}]`);
+                if (banned.length > 0) lines.push(`  🚫 Banned: [${banned.join(', ')}]`);
+
+                lines.forEach((l,i) => {
+                    const d = document.createElement('div');
+                    d.className = 'al ' + (i===0 ? lvl : (l.includes('🚩')?'warn':l.includes('🚫')?'err':'tele'));
+                    d.innerHTML = l;
+                    logPanel.appendChild(d);
+                });
+                while (logPanel.children.length > 300) logPanel.removeChild(logPanel.firstChild);
+                logPanel.scrollTop = logPanel.scrollHeight;
+            }
+        }
+
+        async function verifyTamper(studentId, studentName) {
+            const sid = String(studentId);
+            const student = studentsData[sid];
+            if (!student) {
+                showAlert(`Student ${sid} not found`, 'warning');
+                return;
+            }
+
+            showAlert(`🛡️ Running tamper verification for ${studentName}...`, 'info');
+
+            // Get the latest frame from the card's img element
+            const card = document.getElementById(`student-${sid}`);
+            const feedImg = card ? card.querySelector('img.live-feed') : null;
+            const feedSrc = feedImg ? feedImg.src : null;
+
+            // Get student's self-reported telemetry
+            const history = telemetryV2ByStudent.get(sid) || [];
+            const latest = history.length > 0 ? history[history.length - 1] : null;
+
+            // Try to use AdminTamperVerifier if available
+            if (adminVerifier && feedSrc && feedSrc.startsWith('data:image')) {
+                try {
+                    // Create temporary canvas to feed into verifier
+                    const img = new Image();
+                    img.src = feedSrc;
+                    await new Promise((resolve, reject) => {
+                        img.onload = resolve;
+                        img.onerror = reject;
+                        setTimeout(reject, 3000);
+                    });
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.naturalWidth || 640;
+                    canvas.height = img.naturalHeight || 480;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+                    // Run admin-side inference
+                    const adminResult = await adminVerifier.analyzeFrame(canvas);
+                    const adminScore = Math.round((adminResult?.suspicionScore || 0) * 100);
+                    const studentScore = student.suspicion_score || 0;
+                    const diff = Math.abs(adminScore - studentScore);
+
+                    const adminFlags = adminResult?.activeFlags ? Array.from(adminResult.activeFlags) : [];
+                    const studentFlags = student.active_flags || [];
+
+                    let verdict = '✅ MATCH';
+                    let alertType = 'success';
+                    if (diff > 40) {
+                        verdict = '🚨 HIGH MISMATCH';
+                        alertType = 'danger';
+                    } else if (diff > 20) {
+                        verdict = '⚠️ MODERATE MISMATCH';
+                        alertType = 'warning';
+                    }
+
+                    const msg = `🛡️ Tamper Check: ${studentName}\n` +
+                        `${verdict} (diff: ${diff})\n` +
+                        `Admin score: ${adminScore} │ Student score: ${studentScore}\n` +
+                        `Admin flags: [${adminFlags.join(', ')}]\n` +
+                        `Student flags: [${studentFlags.join(', ')}]`;
+
+                    showAlert(msg, alertType);
+
+                    // Flag to backend if high mismatch
+                    if (diff > 40) {
+                        student.tamperFlagged = true;
+                        student.tamperMismatch = diff;
+                        updateDashboard(true);
+                        try {
+                            await fetch('/api/admin/tamper-flag', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+                                body: JSON.stringify({ student_id: sid, mismatch_score: diff, admin_score: adminScore, student_score: studentScore })
+                            });
+                        } catch(e) { console.error('tamper flag failed', e); }
+                    }
+                } catch (err) {
+                    console.error('Tamper verify error:', err);
+                    // Fall back to telemetry-only check
+                    doTelemetryOnlyCheck(sid, studentName, student, latest);
+                }
+            } else {
+                // No WASM verifier or no frame — do telemetry-based check
+                doTelemetryOnlyCheck(sid, studentName, student, latest);
+            }
+        }
+
+        function doTelemetryOnlyCheck(sid, studentName, student, latest) {
+            const score = student.suspicion_score || 0;
+            const banned = student.banned_labels || [];
+            const flags = student.active_flags || [];
+            const faces = student.face_count;
+
+            const issues = [];
+            if (score > 70) issues.push(`High suspicion (${score})`);
+            if (banned.length > 0) issues.push(`Banned objects: ${banned.join(', ')}`);
+            if (faces === 0) issues.push('No face detected');
+            if (faces > 1) issues.push(`${faces} faces detected`);
+            if (flags.includes('LOOKING_AWAY')) issues.push('Looking away');
+            if (flags.includes('PHONE_DETECTED') || flags.includes('BOOK_DETECTED')) issues.push('Prohibited object');
+
+            const verdict = issues.length === 0 ? '✅ No issues found' : `🚨 ${issues.length} issue(s) found`;
+            const alertType = issues.length === 0 ? 'success' : 'danger';
+
+            showAlert(`🛡️ Telemetry Check: ${studentName}\n${verdict}\n${issues.length > 0 ? issues.join('\n') : 'Student appears compliant'}`, alertType);
+        }
+
         function closeLiveFeed() {
             const modalFeed = document.getElementById('modal-live-feed');
             modalFeed.src = '';
@@ -1035,6 +1502,7 @@
             }
 
             document.getElementById('live-feed-modal').style.display = 'none';
+            document.getElementById('modal-telemetry-panel').style.display = 'none';
             currentStreamingStudent = null;
         }
 
@@ -1143,6 +1611,12 @@
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') {
                 closeLiveFeed();
+            }
+        });
+
+        window.addEventListener('beforeunload', function () {
+            if (adminVerifier) {
+                try { adminVerifier.stop(); } catch (_) { }
             }
         });
 

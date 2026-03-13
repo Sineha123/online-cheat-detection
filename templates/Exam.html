@@ -14,10 +14,8 @@
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     {% endif %}
 
-    <!-- TensorFlow.js and Models -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
+    <!-- Custom AI Engine -->
+    <script src="/static/proctor_engine/student_engine.js"></script>
 
     <title>Online CheatBuster - Exam</title>
 
@@ -663,6 +661,58 @@
             margin-top: 5px;
         }
 
+        /* SUSPICION METER STYLES */
+        .suspicion-meter-container {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 15px;
+            margin-top: 15px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .suspicion-title {
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .suspicion-bar-bg {
+            height: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+            overflow: hidden;
+            position: relative;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        .suspicion-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #10b981 0%, #f59e0b 50%, #ef4444 100%);
+            border-radius: 6px;
+            transition: width 0.3s ease-out, background-color 0.3s ease;
+        }
+
+        .suspicion-value {
+            color: white;
+            font-size: 24px;
+            font-weight: 800;
+            margin-top: 8px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .suspicion-status {
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 5px;
+            color: #10b981; /* Default Safe */
+            transition: color 0.3s ease;
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
             .premium-header {
@@ -903,6 +953,17 @@
                             <div class="quiz-config-indicator" id="quiz-config-indicator">
                                 <i class="fas fa-random me-2"></i>
                                 <span id="selected-quiz-config">125 Questions (25 per Subject)</span>
+                            </div>
+                            <!-- NEW SUSPICION METER UI -->
+                            <div class="suspicion-meter-container" id="suspicion-meter-container" style="display: none;">
+                                <div class="suspicion-title">
+                                    <i class="fas fa-eye me-2"></i>Live Suspicion Score
+                                </div>
+                                <div class="suspicion-bar-bg">
+                                    <div class="suspicion-bar-fill" id="suspicion-bar-fill"></div>
+                                </div>
+                                <div class="suspicion-value" id="suspicion-value">0%</div>
+                                <div class="suspicion-status" id="suspicion-status">Safe</div>
                             </div>
                         </div>
 
@@ -1174,6 +1235,7 @@
         const studentId = "{{ student_id|default(0) }}";
         const studentName = "{{ student_name|default('Student') }}";
         const CSRF_TOKEN = "{{ csrf_token() }}";
+        const WASM_PROCTOR_ENABLED = {{ 'true' if wasm_proctor_enabled else 'false' }};
         const hasProfile = ("{{ student_profile|default(false)|string|lower }}" === "true");
 
         // ============================================
@@ -1273,6 +1335,7 @@
                     await remoteFrameUploader.init();
                     lastCameraInitError = null;
                 } catch (e) {
+                    console.error("waitForCameraReady: remoteFrameUploader.init failed", e);
                     lastCameraInitError = (e && e.message) ? e.message : 'Unable to access camera.';
                     return false;
                 }
@@ -1299,12 +1362,42 @@
         }
 
         async function verifyFaceBeforeExamStart() {
-            const ready = await waitForCameraReady(12000);
-            if (!ready) {
-                const err = lastCameraInitError || 'Camera not ready. Please allow camera and wait a few seconds.';
-                return { ok: false, matched: false, error: err };
+            // Ensure camera is actually initialized before polling
+            try {
+                await remoteFrameUploader.init();
+            } catch (e) {
+                console.error("verifyFace: camera init failed", e);
+                return { ok: false, matched: false, error: (e && e.message) || 'Camera initialization failed.' };
             }
-            const imageData = await remoteFrameUploader.captureFrameDataURL(0.8);
+
+            // Give camera a moment to settle
+            const startedAt = Date.now();
+            let lastTrackState = 'none';
+            let lastVideoW = 0;
+            
+            while (Date.now() - startedAt < 12000) {
+                const trk = remoteFrameUploader.stream ? remoteFrameUploader.stream.getVideoTracks()[0] : null;
+                lastTrackState = trk ? trk.readyState : 'none';
+                lastVideoW = remoteFrameUploader.video ? remoteFrameUploader.video.videoWidth : 0;
+                
+                const trackLive = trk && trk.readyState === 'live';
+                if (remoteFrameUploader.video && (lastVideoW > 0 || trackLive)) {
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 250));
+            }
+            if (!remoteFrameUploader.video && (!remoteFrameUploader.stream || !remoteFrameUploader.stream.getVideoTracks()[0])) {
+                console.error("verifyFace fail: ", { trackState: lastTrackState, videoW: lastVideoW });
+                return { ok: false, matched: false, error: 'Camera not ready. Please allow camera and wait a few seconds.' };
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = remoteFrameUploader.video.videoWidth || 640;
+            canvas.height = remoteFrameUploader.video.videoHeight || 480;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(remoteFrameUploader.video, 0, 0, canvas.width, canvas.height);
+            const imageData = canvas.toDataURL('image/jpeg', 0.8);
+
             if (!imageData) {
                 return { ok: false, matched: false, error: 'Unable to capture camera frame. Please check camera device.' };
             }
@@ -1348,6 +1441,23 @@
             };
         }
 
+        async function verifyWasmIntegrityBeforeExamStart() {
+            try {
+                showFaceVerifyStatus('Verifying proctor engine integrity...', 'info');
+                const verifiedRes = await remoteFrameUploader.verifyIntegrity();
+                if (!verifiedRes || !verifiedRes.verified) {
+                    showFaceVerifyStatus(`Integrity check failed.`, 'error');
+                    return false;
+                }
+                showFaceVerifyStatus(`Integrity OK`, 'success');
+                return true;
+            } catch (err) {
+                const msg = (err && err.message) ? err.message : 'Integrity check failed';
+                showFaceVerifyStatus(`Integrity check failed: ${msg}`, 'error');
+                return false;
+            }
+        }
+
         async function startExam() {
             if (examStarted) return;
             if (!preExamFaceVerified) {
@@ -1360,6 +1470,12 @@
                 showFaceVerifyStatus('Face verification expired. Please verify again.', 'error');
                 return;
             }
+
+            const integrityOk = await verifyWasmIntegrityBeforeExamStart();
+            if (!integrityOk) {
+                return;
+            }
+
             let sessionStartedOk = false;
             try {
                 const resp = await fetch('/api/exam-session/start', {
@@ -1400,6 +1516,12 @@
             // Update UI
             document.getElementById('mainContent').style.display = 'none';
             document.getElementById('quizContent').innerHTML = generateQuizHTML();
+
+            // Display Suspicion UI and Start Engine
+            document.getElementById('suspicion-meter-container').style.display = 'block';
+            if (remoteFrameUploader.proctorEngine) {
+                await remoteFrameUploader.proctorEngine.start();
+            }
 
             // Start timer and monitoring
             startTimer();
@@ -1860,7 +1982,10 @@
 
             initSocketIO() {
                 try {
-                    this.socket = io('/student');
+                    this.socket = io('/student', {
+                        transports: ['websocket', 'polling'],
+                        reconnectionDelayMax: 10000
+                    });
                     this.socket.on('connect', () => console.log('Connected to exam monitoring'));
                     this.socket.on('student_violation', (data) => this.addWarning(data));
                     this.socket.on('warnings_cleared', () => this.clearWarnings());
@@ -2180,8 +2305,7 @@
                 examStarted = false;
                 voiceMonitor.stop();
                 sessionRecorder.stop();
-                // Stop frame uploading but keep the camera alive
-                remoteFrameUploader.stop();
+                studentProctorEngine.stop();
                 console.log('🚫 Exam terminated:', reason);
 
                 const screen = document.getElementById('termination-screen');
@@ -2435,7 +2559,7 @@
             rafId: null,
             running: false,
             inFlight: false,
-            targetFps: 10,
+            targetFps: 20,
             lastSentAt: 0,
             lastHealthAt: 0,
             darkFrameStreak: 0,
@@ -2445,87 +2569,121 @@
             cameraWarnCooldownUntil: 0,
             initAttempts: 0,
 
-            // New TFJS properties
-            tfModelsLoaded: false,
-            cocoModel: null,
-            faceModel: null,
+            // WASM proctor properties
+            engineReady: false,
+            proctorEngine: null,
+            integrityState: null,
             suspicionScore: 0,
-            consecutiveMissingFace: 0,
 
             async initModels() {
-                try {
-                    console.log("[TFJS] Loading client-side WASM models...");
-                    this.cocoModel = await cocoSsd.load();
-                    this.faceModel = await blazeface.load();
-                    this.tfModelsLoaded = true;
-                    console.log("[TFJS] Models loaded successfully!");
-                } catch (e) {
-                    console.error("[TFJS] Error loading models:", e);
+                if (this.engineReady && this.proctorEngine) return;
+                if (!WASM_PROCTOR_ENABLED) {
+                    this.engineReady = true;
+                    this.integrityState = { checked: true, verified: true, version: 'disabled', failed_assets: [] };
+                    console.warn("[WASM Engine] Disabled via WASM_PROCTOR_ENABLED");
+                    return;
                 }
+                const mod = await import('/static/proctor_engine/runtime/student_engine.js');
+                const StudentProctorEngine = mod.StudentProctorEngine;
+                this.proctorEngine = new StudentProctorEngine({
+                    studentId: studentId,
+                    socket: warningSystem.socket,
+                    modelPath: '/static/proctor_engine/models/proctor_yolo.onnx',
+                    manifestUrl: '/api/proctor/manifest',
+                    inferFps: 18
+                });
+                await this.proctorEngine.init();
+                this.engineReady = true;
+                console.log("[WASM Engine] Ready");
+            },
+
+            async verifyIntegrity() {
+                if (!WASM_PROCTOR_ENABLED) {
+                    this.integrityState = { checked: true, verified: true, version: 'disabled', failed_assets: [] };
+                    return this.integrityState;
+                }
+                if (!this.engineReady || !this.proctorEngine) {
+                    await this.initModels();
+                }
+                this.integrityState = await this.proctorEngine.verifyIntegrity();
+                return this.integrityState;
             },
 
             async runLocalInference(canvasEl) {
-                if (!this.tfModelsLoaded || !this.cocoModel || !this.faceModel) return;
+                if (!this.engineReady) return;
                 try {
-                    let newScore = 0;
-
-                    // 1. Detect faces (BlazeFace)
-                    const faces = await this.faceModel.estimateFaces(canvasEl, false);
-                    if (faces.length === 0) {
-                        this.consecutiveMissingFace++;
-                        if (this.consecutiveMissingFace > 5) newScore += 40; // No face penalty
-                    } else if (faces.length > 1) {
-                        this.consecutiveMissingFace = 0;
-                        newScore += 50; // Multiple faces penalty
-                    } else {
-                        this.consecutiveMissingFace = 0;
+                    if (!this.proctorEngine) {
+                        const scoreText = document.getElementById('suspicion-score-text');
+                        const scoreBar = document.getElementById('suspicion-score-bar');
+                        if (scoreText) scoreText.innerText = `Score: ${this.suspicionScore}`;
+                        if (scoreBar) {
+                            scoreBar.style.width = `${this.suspicionScore}%`;
+                            scoreBar.style.backgroundColor = '#10b981';
+                            if (scoreText) scoreText.style.color = '#10b981';
+                        }
+                        return;
                     }
+                    const telemetry = await this.proctorEngine.processFrame(canvasEl);
+                    if (!telemetry) return;
 
-                    // 2. Detect objects (COCO-SSD)
-                    let cellPhoneDetected = false;
-                    let laptopDetected = false;
+                    this.suspicionScore = Number(telemetry.analysis.suspicion_score || 0);
+                    const score = this.suspicionScore;
+                    const m = telemetry.metrics || {};
+                    const a = telemetry.analysis || {};
+                    const p = telemetry.perf || {};
 
-                    if (newScore < 100) {
-                        const predictions = await this.cocoModel.detect(canvasEl);
-                        predictions.forEach(pred => {
-                            const className = pred.class.toLowerCase();
-                            if (className === 'cell phone') { cellPhoneDetected = true; newScore += 80; }
-                            if (className === 'laptop') { laptopDetected = true; newScore += 40; }
-                            if (className === 'book') { newScore += 30; }
-                        });
-                    }
-
-                    this.suspicionScore = Math.min(100, newScore);
-
-                    // 3. Update local UI
+                    // ── Update sidebar score bar ──
                     const scoreText = document.getElementById('suspicion-score-text');
                     const scoreBar = document.getElementById('suspicion-score-bar');
-                    if (scoreText) scoreText.innerText = `Score: ${this.suspicionScore}`;
-                    if (scoreBar) {
-                        scoreBar.style.width = `${this.suspicionScore}%`;
-                        if (this.suspicionScore > 50) {
-                            scoreBar.style.backgroundColor = '#e60b0b';
-                            scoreText.style.color = '#e60b0b';
-                        } else if (this.suspicionScore > 20) {
-                            scoreBar.style.backgroundColor = '#f59e0b';
-                            scoreText.style.color = '#f59e0b';
-                        } else {
-                            scoreBar.style.backgroundColor = '#10b981';
-                            scoreText.style.color = '#10b981';
-                        }
+                    const scoreColor = score < 40 ? '#10b981' : score < 70 ? '#f59e0b' : '#ef4444';
+                    if (scoreText) { scoreText.innerText = `Score: ${score}`; scoreText.style.color = scoreColor; }
+                    if (scoreBar) { scoreBar.style.width = `${score}%`; scoreBar.style.backgroundColor = scoreColor; }
+
+                    // ── Update floating proctor panel ──
+                    const ppScore = document.getElementById('ppScore');
+                    const ppVerdict = document.getElementById('ppVerdict');
+                    if (ppScore) { ppScore.textContent = score; ppScore.style.color = scoreColor; }
+                    if (ppVerdict) {
+                        const v = a.verdict || a.safety_level || 'READY';
+                        ppVerdict.textContent = v;
+                        ppVerdict.className = 'pp-badge ' + (score < 30 ? 'safe' : score < 60 ? 'warn' : 'danger');
                     }
 
-                    // 4. Send Telemetry to Server via WebSockets
+                    // ── Detailed logs every 5 frames ──
+                    _ppFrameN++;
+                    if (_ppFrameN % 5 === 0 && typeof proctorLog === 'function') {
+                        const flagsArr = a.active_flags ? Array.from(a.active_flags) : [];
+                        const banned = m.banned_labels ? Array.from(m.banned_labels) : [];
+                        const lvl = score < 30 ? 'tele' : score < 60 ? 'warn' : 'err';
+
+                        proctorLog(`<b>#${telemetry.frame_id}</b> │ ${a.verdict||'-'} │ Score: <b>${score}</b>`, lvl);
+                        proctorLog(`  👤 Faces:${m.face_count} Persons:${m.person_count} │ Yaw:${_safeN(m.yaw_deg,1)}° Pitch:${_safeN(m.pitch_deg,1)}° Roll:${_safeN(m.roll_deg,1)}°`, 'tele');
+                        proctorLog(`  👁 EAR:${_safeN(m.ear_mean,3)} GazeOff:${_safeN(m.gaze_offset,2)} │ 💡Light:${_safeN(m.lighting_score,2)} │ ⏱${_safeN(p.infer_ms,0)}ms`, 'tele');
+                        if (flagsArr.length > 0) proctorLog(`  🚩 [${flagsArr.join(', ')}]`, 'warn');
+                        if (banned.length > 0) proctorLog(`  🚫 Banned: [${banned.join(', ')}]`, 'err');
+                    }
+
+                    // ── Emit full telemetry to admin via socket ──
                     if (typeof warningSystem !== 'undefined' && warningSystem.socket && typeof studentId !== 'undefined') {
-                        warningSystem.socket.emit('telemetry_update', {
+                        warningSystem.socket.emit('telemetry_update_v2', {
                             student_id: studentId,
-                            score: this.suspicionScore,
-                            faces: faces.length,
-                            objects: { phone: cellPhoneDetected, laptop: laptopDetected }
+                            timestamp_ms: Date.now(),
+                            frame_id: telemetry.frame_id,
+                            analysis: { suspicion_score: score, verdict: a.verdict, safety_level: a.safety_level, active_flags: a.active_flags ? Array.from(a.active_flags) : [], raw_flags: a.raw_flags ? Array.from(a.raw_flags) : [] },
+                            metrics: {
+                                face_count: m.face_count, person_count: m.person_count,
+                                yaw_deg: m.yaw_deg, pitch_deg: m.pitch_deg, roll_deg: m.roll_deg,
+                                ear_mean: m.ear_mean, gaze_offset: m.gaze_offset,
+                                gaze_yaw_deg: m.gaze_yaw_deg, gaze_pitch_deg: m.gaze_pitch_deg,
+                                lighting_score: m.lighting_score,
+                                banned_labels: m.banned_labels ? Array.from(m.banned_labels) : [],
+                                accessory: m.accessory || {}
+                            },
+                            perf: { infer_ms: p.infer_ms, effective_fps: p.effective_fps }
                         });
                     }
                 } catch (e) {
-                    console.error("[TFJS] Inference failed:", e);
+                    console.error("[WASM Engine] Inference failed:", e);
                 }
             },
 
@@ -2545,7 +2703,7 @@
                 const oldTrack = this.stream && this.stream.getVideoTracks ? this.stream.getVideoTracks()[0] : null;
                 if (this.stream && this.video && oldTrack && oldTrack.readyState === 'live') return true;
 
-                if (!this.tfModelsLoaded) {
+                if (!this.engineReady) {
                     await this.initModels();
                 }
 
@@ -2558,15 +2716,19 @@
                     this.video.autoplay = true;
                     this.video.setAttribute('playsinline', 'true');
                     this.video.muted = true;
-                    this.video.style.position = 'absolute';
-                    this.video.style.opacity = '0';
+                    this.video.style.position = 'fixed';
+                    this.video.style.opacity = '1';
                     this.video.style.pointerEvents = 'none';
+                    this.video.style.left = '-10000px';
+                    this.video.style.top = '0px';
+                    this.video.style.width = '640px';
+                    this.video.style.height = '480px';
                     document.body.appendChild(this.video);
                     this.canvas = document.createElement('canvas');
 
                     const cameraConstraints = [
-                        { video: { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, min: 12 } }, audio: false },
-                        { video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, min: 10 } }, audio: false },
+                        { video: { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, max: 20, min: 12 } }, audio: false },
+                        { video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 18, max: 20, min: 10 } }, audio: false },
                         { video: { width: { ideal: 960 }, height: { ideal: 540 } }, audio: false },
                         { video: true, audio: false }
                     ];
@@ -2723,26 +2885,22 @@
                             });
                         }
 
-                        // Concurrent slow POST for Admin Panel Video CCTV (approx 1 FPS)
-                        if (!this.inFlightPost && ((nowTs - (this.lastPostAt || 0)) >= 1000)) {
+                        // Send live frame + telemetry via socket for admin (~12 FPS)
+                        if (!this.inFlightPost && ((nowTs - (this.lastPostAt || 0)) >= 83)) {
                             this.inFlightPost = true;
                             this.lastPostAt = nowTs;
-                            const imageData = this.canvas.toDataURL('image/jpeg', 0.68);
-                            const controller = new AbortController();
-                            const timeout = setTimeout(() => controller.abort(), 900);
-                            fetch('/api/student-frame', {
-                                method: 'POST',
-                                credentials: 'same-origin',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'X-CSRF-Token': CSRF_TOKEN
-                                },
-                                body: JSON.stringify({ image_data: imageData, student_id: studentId }),
-                                signal: controller.signal
-                            }).finally(() => {
-                                clearTimeout(timeout);
-                                this.inFlightPost = false;
-                            });
+                            try {
+                                const frameB64 = this.canvas.toDataURL('image/jpeg', 0.40).split(',')[1];
+                                if (typeof warningSystem !== 'undefined' && warningSystem.socket && typeof studentId !== 'undefined') {
+                                    warningSystem.socket.emit('student_live_frame', {
+                                        student_id: studentId,
+                                        frame: frameB64,
+                                        timestamp_ms: Date.now(),
+                                        score: this.suspicionScore || 0
+                                    });
+                                }
+                            } catch(_e) {}
+                            this.inFlightPost = false;
                         }
                     } catch (_) { }
                     this.rafId = requestAnimationFrame(step);
@@ -2753,22 +2911,6 @@
             async captureFrameDataURL(quality = 0.8) {
                 const targetW = 320;
                 try {
-                    // Primary path: grab frame directly from live video track.
-                    const track = this.stream && this.stream.getVideoTracks ? this.stream.getVideoTracks()[0] : null;
-                    if (track && typeof ImageCapture !== 'undefined') {
-                        try {
-                            const ic = new ImageCapture(track);
-                            const bmp = await ic.grabFrame();
-                            const w = targetW;
-                            const h = Math.round((bmp.height / bmp.width) * w) || 180;
-                            this.canvas.width = w;
-                            this.canvas.height = h;
-                            const ctx = this.canvas.getContext('2d');
-                            ctx.drawImage(bmp, 0, 0, w, h);
-                            return this.canvas.toDataURL('image/jpeg', quality);
-                        } catch (_) { }
-                    }
-                    // Fallback path: use video element frame.
                     if (!this.video || this.video.videoWidth <= 0) return null;
                     const h = Math.round((this.video.videoHeight / this.video.videoWidth) * targetW) || 180;
                     this.canvas.width = targetW;
@@ -2776,7 +2918,8 @@
                     const ctx = this.canvas.getContext('2d');
                     ctx.drawImage(this.video, 0, 0, targetW, h);
                     return this.canvas.toDataURL('image/jpeg', quality);
-                } catch (_) {
+                } catch (err) {
+                    console.error('Frame capture error:', err);
                     return null;
                 }
             },
@@ -3082,15 +3225,18 @@
 
             async start() {
                 if (this.started) return true;
-                if (!remoteFrameUploader.canvas || !remoteFrameUploader.canvas.captureStream) {
-                    console.log('Session recorder skipped: recording canvas unavailable');
+                if (!remoteFrameUploader.video) {
+                    console.log('Session recorder skipped: video element unavailable');
                     return false;
                 }
-                const captureFps = Math.max(8, Number(remoteFrameUploader.targetFps) || 15);
-                const canvasStream = remoteFrameUploader.canvas.captureStream(captureFps);
-                const videoTrack = canvasStream && canvasStream.getVideoTracks
-                    ? canvasStream.getVideoTracks()[0]
-                    : null;
+                const track = remoteFrameUploader.video.srcObject && remoteFrameUploader.video.srcObject.getVideoTracks()[0];
+                if (!track) {
+                    console.log('Session recorder skipped: video track unavailable');
+                    return false;
+                }
+                const captureFps = 15;
+                const canvasStream = new MediaStream([track]);
+                const videoTrack = canvasStream.getVideoTracks()[0];
                 const audioTrack = voiceMonitor.stream && voiceMonitor.stream.getAudioTracks
                     ? voiceMonitor.stream.getAudioTracks()[0]
                     : null;
@@ -3211,16 +3357,66 @@
             setTimeout(() => {
                 warningSystem.acknowledgeGraceUntil = Date.now() + 2000;
             }, 0);
-            // Prime camera access early so monitoring has a live track from start.
+
+            // Initialize WASM Engine early and configure SocketIO reporting
             setTimeout(async () => {
                 try {
-                    await remoteFrameUploader.init();
+                    await remoteFrameUploader.initModels();
                     lastCameraInitError = null;
                 } catch (err) {
-                    lastCameraInitError = (err && err.message) ? err.message : 'Camera permission denied or unavailable.';
-                    showFaceVerifyStatus(`Camera issue: ${lastCameraInitError}`, 'error');
+                    lastCameraInitError = (err && err.message) ? err.message : 'Camera / Engine init failed.';
+                    showFaceVerifyStatus(`Proctor Engine issue: ${lastCameraInitError}`, 'error');
                 }
             }, 150);
+
+            // Listen to student engine telemetry and update local suspicion bar
+            document.addEventListener('proctor_telemetry', (e) => {
+                if (warningSystem.examTerminated || !examStarted) return;
+
+                const telemetry = e.detail;
+
+                // Send to backend via SocketIO for admin dashboard viewing
+                if (warningSystem.socket && studentId) {
+                    warningSystem.socket.emit('student_telemetry', {
+                        student_id: studentId,
+                        telemetry: telemetry
+                    });
+                }
+
+                // Update Local UI if suspicion changes
+                if (typeof telemetry.suspicionScore === 'number') {
+                    const score = Math.round(telemetry.suspicionScore * 100);
+                    const barFill = document.getElementById('suspicion-bar-fill');
+                    const valueTxt = document.getElementById('suspicion-value');
+                    const statusTxt = document.getElementById('suspicion-status');
+
+                    barFill.style.width = score + '%';
+                    valueTxt.textContent = score + '%';
+
+                    if (score < 25) {
+                        statusTxt.textContent = "Safe";
+                        statusTxt.style.color = "#10b981";
+                    } else if (score < 60) {
+                        statusTxt.textContent = "Warning";
+                        statusTxt.style.color = "#f59e0b";
+                    } else {
+                        statusTxt.textContent = "Critical";
+                        statusTxt.style.color = "#ef4444";
+                    }
+                    
+                    // Trigger a warning if suspicion score is consistently high!
+                    // E.g. Missing face, Multiple faces detected, Phone detected, Looking away...
+                    if (score > 80 && telemetry.faceCount === 0) {
+                        warningSystem.addWarning({ type: 'FACE_MISSING', details: 'No face detected in camera viewport', severity: 'high', student_id: studentId });
+                    }
+                    if (telemetry.faceCount > 1) {
+                         warningSystem.addWarning({ type: 'MULTIPLE_FACES', details: `Detected ${telemetry.faceCount} faces!`, severity: 'high', student_id: studentId });
+                    }
+                    if (telemetry.phoneDetected) {
+                         warningSystem.addWarning({ type: 'DEVICE_DETECTED', details: 'Prohibited electronic device detected', severity: 'high', student_id: studentId });
+                    }
+                }
+            });
         });
 
         let exitSignalSent = false;
@@ -3250,7 +3446,9 @@
 
         window.addEventListener('beforeunload', (e) => {
             signalExamExit('Tab/window closed during exam');
-            remoteFrameUploader.destroy();
+            if (remoteFrameUploader.proctorEngine) {
+                remoteFrameUploader.proctorEngine.stop();
+            }
             voiceMonitor.stop();
             sessionRecorder.stop();
             if (!warningSystem.examTerminated && examStarted) {
@@ -3262,6 +3460,41 @@
 
         console.log('%c🔒 ONLINE CHEATBUSTER SECURITY', 'color: #ef4444; font-size: 20px; font-weight: bold;');
     </script>
+<!-- ═══════ FLOATING PROCTOR PANEL ═══════ -->
+<style>
+  #proctorPanel { position:fixed; bottom:16px; right:16px; z-index:9999; width:360px; font-family:'Segoe UI',sans-serif; filter:drop-shadow(0 4px 20px rgba(0,0,0,0.35)); }
+  #proctorPanel .pp-header { background:linear-gradient(135deg,#1e1b4b,#312e81); color:#fff; padding:10px 14px; border-radius:10px 10px 0 0; display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; }
+  #proctorPanel .pp-header.collapsed { border-radius:10px; }
+  #proctorPanel .pp-badge { font-size:11px; font-weight:700; padding:3px 8px; border-radius:6px; }
+  #proctorPanel .pp-badge.safe { background:#10b981; } .pp-badge.warn { background:#f59e0b; color:#000; } .pp-badge.danger { background:#ef4444; }
+  #proctorPanel .pp-score { font-size:20px; font-weight:800; margin-left:auto; }
+  #proctorPanel .pp-logs { background:#0f0d23; max-height:260px; overflow-y:auto; padding:6px 10px; border-radius:0 0 10px 10px; scrollbar-width:thin; scrollbar-color:#4338ca #0f0d23; }
+  #proctorPanel .pp-log { font-size:10.5px; font-family:'SF Mono',Consolas,monospace; line-height:1.45; padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04); color:#a5b4fc; white-space:pre-wrap; word-break:break-word; }
+  #proctorPanel .pp-log.info { color:#7dd3fc; } .pp-log.warn { color:#fbbf24; } .pp-log.err { color:#f87171; } .pp-log.tele { color:#c084fc; }
+  #proctorPanel .pp-arrow { transition:transform 0.2s; }
+  #proctorPanel .pp-bar-track { height:5px; background:rgba(255,255,255,0.15); border-radius:3px; margin-top:6px; overflow:hidden; }
+  #proctorPanel .pp-bar-fill { height:100%; border-radius:3px; transition:width 0.3s,background 0.3s; }
+</style>
+<div id="proctorPanel">
+  <div class="pp-header" id="ppToggle" onclick="(function(){var l=document.getElementById('ppLogs'),h=document.getElementById('ppToggle'),a=document.getElementById('ppArrow');if(l.style.display==='none'){l.style.display='block';h.classList.remove('collapsed');a.style.transform='rotate(0)';}else{l.style.display='none';h.classList.add('collapsed');a.style.transform='rotate(180deg)';}})()">
+    <span style="font-weight:700;font-size:13px;">🔬 Proctor</span>
+    <span class="pp-badge safe" id="ppVerdict">READY</span>
+    <span class="pp-score" id="ppScore" style="color:#10b981">0</span>
+    <span class="pp-arrow" id="ppArrow" style="font-size:14px;">▼</span>
+  </div>
+  <div id="ppLogs" class="pp-logs" style="display:none;"></div>
+</div>
+<script>
+  var _ppLogMax=200, _ppFrameN=0;
+  function proctorLog(msg,cls){
+    var c=document.getElementById('ppLogs'); if(!c)return;
+    var d=document.createElement('div'); d.className='pp-log '+(cls||'');
+    d.innerHTML=msg; c.appendChild(d);
+    while(c.children.length>_ppLogMax) c.removeChild(c.firstChild);
+    c.scrollTop=c.scrollHeight;
+  }
+  function _safeN(v,d){ return v!=null&&typeof v==='number'?v.toFixed(d):'-'; }
+</script>
 </body>
 
 </html>

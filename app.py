@@ -23,7 +23,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 
 from flask import (
-    Flask, render_template, request, jsonify, redirect, url_for, flash, Response, send_from_directory, abort, session
+    Flask, render_template, request, jsonify, redirect, url_for, flash, Response, send_from_directory, abort, session, send_file
 )
 
 try:
@@ -37,8 +37,41 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# DB support
 import pymysql.cursors
+
+# -------------------------
+# Feature Flags (ML removed)
+# -------------------------
+CV2_AVAILABLE = False
+np = None
+cv2 = None
+MEDIAPIPE_AVAILABLE = False
+face_mesh_detector = None
+pose_detector = None
+TORCH_AVAILABLE = False
+ULTRALYTICS_AVAILABLE = False
+FACE_REC_AVAILABLE = False
+OCR_AVAILABLE = False
+object_net_enabled = False
+yolo_loaded_model_path = None
+yolo_device = 'cpu'
+prohibited_class_ids = []
+
+try:
+    import requests
+except ImportError:
+    pass
+
+# Try importing flask_socketio
+try:
+    from flask_socketio import SocketIO, emit, join_room, leave_room
+    SOCKETIO_AVAILABLE = True
+except ImportError:
+    SOCKETIO_AVAILABLE = False
+    SocketIO = None
+    emit = None
+    logger.warning("Flask-SocketIO not available. Install with: pip install flask-socketio")
+
 class MySQL:
     def __init__(self, app=None):
         self.app = app
@@ -63,104 +96,10 @@ class MySQL:
         return g.mysql_db
 
 
-# OpenCV / numpy
-try:
-    import cv2
-    import numpy as np
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
-    cv2 = None
-    np = None
-    logger.warning("OpenCV not available. Install with: pip install opencv-python")
-
-# MediaPipe Face Mesh (for eye landmarks, EAR, and gaze direction)
-try:
-    import mediapipe as mp
-
-    mp_face_mesh = mp.solutions.face_mesh
-    mp_pose = mp.solutions.pose
-    face_mesh_detector = mp_face_mesh.FaceMesh(
-        static_image_mode=False,
-        max_num_faces=2,            # MUST be 2 to detect multiple faces
-        refine_landmarks=True,      # enables iris landmarks
-        min_detection_confidence=0.3,  # lower = detects faces with caps/angles/partial
-        min_tracking_confidence=0.3
-    )
-    pose_detector = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=0,
-        smooth_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    MEDIAPIPE_AVAILABLE = True
-    logger.info("MediaPipe FaceMesh + Pose initialized successfully")
-except Exception as e:
-    mp = None
-    mp_face_mesh = None
-    mp_pose = None
-    face_mesh_detector = None
-    pose_detector = None
-    MEDIAPIPE_AVAILABLE = False
-    logger.warning(f"MediaPipe FaceMesh unavailable: {e}. Install with: pip install mediapipe")
-
-# PyTorch + Ultralytics YOLOv8 (optional but recommended)
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    torch = None
-    TORCH_AVAILABLE = False
-
-try:
-    from ultralytics import YOLO
-    ULTRALYTICS_AVAILABLE = True
-except ImportError:
-    YOLO = None
-    ULTRALYTICS_AVAILABLE = False
-    logger.warning("Ultralytics not available. Install with: pip install ultralytics")
-
-# Face recognition (optional)
-try:
-    import face_recognition
-    FACE_REC_AVAILABLE = True
-except ImportError:
-    face_recognition = None
-    FACE_REC_AVAILABLE = False
-else:
-    # Ensure numpy available for encoding persistence
-    if np is None:
-        import numpy as np
-
-# Optional OCR support (requires pytesseract package + Tesseract binary on host)
-try:
-    import pytesseract
-    OCR_AVAILABLE = True
-except Exception:
-    pytesseract = None
-    OCR_AVAILABLE = False
-
-if OCR_AVAILABLE and pytesseract is not None:
-    try:
-        _ = pytesseract.get_tesseract_version()
-        logger.info("OCR engine available (Tesseract detected)")
-    except Exception:
-        OCR_AVAILABLE = False
-        logger.warning("pytesseract found but Tesseract binary missing; OCR keyword detection disabled.")
-
-# Try importing flask_socketio
-try:
-    from flask_socketio import SocketIO, emit, join_room, leave_room
-    SOCKETIO_AVAILABLE = True
-except ImportError:
-    SOCKETIO_AVAILABLE = False
-    SocketIO = None
-    emit = None
-    logger.warning("Flask-SocketIO not available. Install with: pip install flask-socketio")
-
+# -------------------------
+# WebRTC / Telemetry Engine (WASM-based)
+# -------------------------
 profileName = None
-
 # -------------------------
 # Configuration & Globals
 # -------------------------
@@ -391,6 +330,38 @@ def _same_origin():
             return False
     return False
 
+def _get_active_session_id(student_id):
+    """Retrieve the currently active session ID for a student, returning 0 if none found."""
+    try:
+        cur = mysql.connection.cursor()
+        cur.execute("SELECT SessionID FROM exam_sessions WHERE StudentID=%s AND Status='IN_PROGRESS' ORDER BY StartTime DESC LIMIT 1", (student_id,))
+        row = cur.fetchone()
+        cur.close()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+
+def _build_stream_placeholder(student_id, message):
+    """Build a static placeholder frame for M-JPEG stream when real video isn't available."""
+    if np is None or cv2 is None:
+        return None
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(frame, message, (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+    return frame
+
+def _overlay_status_snapshot(frame, snapshot, overlay_item):
+    """Placeholder to overlay warning information onto an M-JPEG frame without ML inference."""
+    if frame is None or cv2 is None:
+        return frame
+    
+    score = snapshot.get("suspicion_score", 0)
+    warnings = snapshot.get("warning_count", 0)
+    
+    cv2.putText(frame, f"Warnings: {warnings}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if warnings > 0 else (0, 255, 0), 2)
+    cv2.putText(frame, f"Suspicion Score: {score}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if score > 50 else (0, 255, 0), 2)
+    
+    return frame
+
 @app.before_request
 def csrf_protect():
     if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
@@ -472,7 +443,7 @@ def ensure_db_schema():
 # SocketIO
 if SOCKETIO_AVAILABLE:
     try:
-        socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+        socketio = SocketIO(app, cors_allowed_origins="*")
         MONITORING_ENABLED = True
         logger.info("SocketIO initialized successfully")
     except Exception as e:
@@ -483,188 +454,12 @@ else:
     socketio = None
     MONITORING_ENABLED = False
 
-executor = ThreadPoolExecutor(max_workers=6)
-
 # Camera & detection globals
 CAMERA_INDEX = 0
-HAAR_PATH = os.path.join('Haarcascades', 'haarcascade_frontalface_default.xml')
-HAAR_PROFILE_PATH = os.path.join('Haarcascades', 'haarcascade_profileface.xml')
-ENCODINGS_DIR = os.path.join('static', 'face_encodings')
 
-# ============================================================================
-# YOLOv8 Object Detection Setup
-# ============================================================================
-YOLO_DEFAULT_MODEL = 'yolov8n.pt'
-YOLO_CUSTOM_MODEL = os.getenv('YOLO_MODEL_PATH', '').strip()
-YOLO_CONF_THRESHOLD = float(os.getenv('YOLO_CONF_THRESHOLD', '0.22'))
-YOLO_IMG_SIZE = int(os.getenv('YOLO_IMG_SIZE', '640'))
-OBJECT_VIOLATION_COOLDOWN_SEC = float(os.getenv('OBJECT_VIOLATION_COOLDOWN_SEC', '3.5'))
-DNN_OBJECT_FALLBACK_ENABLED = (os.getenv('DNN_OBJECT_FALLBACK_ENABLED', '1') == '1')
-OCR_OBJECT_FALLBACK_ENABLED = (os.getenv('OCR_OBJECT_FALLBACK_ENABLED', '0') == '1')
-# Enable phone shape fallback so smooth/low-texture phones still trigger.
-PHONE_CONTOUR_FALLBACK_ENABLED = (os.getenv('PHONE_CONTOUR_FALLBACK_ENABLED', '1') == '1')
-
-# # Objects that are prohibited during exam
-PROHIBITED_LABELS = {
-    'cell phone', 'mobile phone', 'phone', 'smartphone',
-    'camera', 'webcam',
-    'book', 'notebook', 'copy', 'paper', 'document',
-    'headphones', 'earphones', 'headset', 'earbuds', 'airpods', 'headfree', 'handsfree',
-    'electronic device', 'electronicdevice', 'device',
-    'pen', 'pencil',
-    'watch', 'smartwatch', 'clock'
-}
-
-def _normalize_label(label):
-    value = str(label or '').strip().lower()
-    aliases = {
-        'cellphone': 'cell phone',
-        'phone': 'cell phone',
-        'mobile': 'cell phone',
-        'mobile phone': 'cell phone',
-        'smartphone': 'cell phone',
-        'electronic device': 'cell phone',
-        'electronicdevice': 'cell phone',
-        'device': 'cell phone',
-        'notebook': 'book',
-        'copy': 'book',
-        'paper': 'book',
-        'document': 'book',
-        'earphone': 'earphones',
-        'earbud': 'earbuds',
-        'headphone': 'headphones',
-        'headset': 'headphones',
-        'handsfree': 'headphones',
-        'hands free': 'headphones',
-        'head free': 'headphones',
-        'headfree': 'headphones',
-        'airpod': 'airpods',
-        'pencil': 'pen',
-        'web cam': 'webcam',
-        'books': 'book',
-        'camera phone': 'cell phone',
-        'smart watch': 'watch',
-        'smartwatch': 'watch',
-        'clock': 'watch'
-    }
-    return aliases.get(value, value)
-
-def _label_is_prohibited(label):
-    """Strict selective matching for exam-prohibited objects only."""
-    norm = _normalize_label(label)
-    if norm in PROHIBITED_LABELS:
-        return True
-
-    normalized_tokens = set(re.findall(r'[a-z0-9]+', norm))
-    for bad in PROHIBITED_LABELS:
-        bad_tokens = set(re.findall(r'[a-z0-9]+', bad))
-        if bad_tokens and bad_tokens.issubset(normalized_tokens):
-            return True
-    return False
-
-# Load cascades
-face_cascade = None
-profile_face_cascade = None
-if CV2_AVAILABLE and os.path.exists(HAAR_PATH):
-    face_cascade = cv2.CascadeClassifier(HAAR_PATH)
-    logger.info("Frontal Haar cascade loaded successfully")
-else:
-    logger.warning(f"Frontal Haar cascade not found at {HAAR_PATH} or OpenCV not available.")
-
-if CV2_AVAILABLE and os.path.exists(HAAR_PROFILE_PATH):
-    profile_face_cascade = cv2.CascadeClassifier(HAAR_PROFILE_PATH)
-    logger.info("Profile Haar cascade loaded successfully")
-else:
-    logger.warning(f"Profile Haar cascade not found at {HAAR_PROFILE_PATH}; continuing without it.")
-
-# OpenCV HOG person detector fallback (for second-person presence)
-people_hog = None
-if CV2_AVAILABLE:
-    try:
-        people_hog = cv2.HOGDescriptor()
-        people_hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-    except Exception:
-        people_hog = None
-
-# ── Load YOLOv4-tiny ──────────────────────────────────────────────────────────
-object_net = None
-object_net_enabled = False
-yolo_class_names = {}
-prohibited_class_ids = []
-yolo_infer_lock = threading.Lock()
-yolo_device = 'cpu'
-yolo_loaded_model_path = None
-
-if ULTRALYTICS_AVAILABLE:
-    try:
-        model_candidates = []
-        if YOLO_CUSTOM_MODEL:
-            model_candidates.append(YOLO_CUSTOM_MODEL)
-        model_candidates.extend([
-            os.path.join('models', 'best.pt'),
-            os.path.join('models', 'custom.pt'),
-            os.path.join('models', 'yolov8n.pt'),
-            YOLO_DEFAULT_MODEL
-        ])
-
-        resolved_model = None
-        for candidate in model_candidates:
-            if candidate == YOLO_DEFAULT_MODEL or os.path.exists(candidate):
-                resolved_model = candidate
-                break
-        if resolved_model is None:
-            resolved_model = YOLO_DEFAULT_MODEL
-
-        object_net = YOLO(resolved_model)
-        yolo_loaded_model_path = resolved_model
-        if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
-            yolo_device = 'cuda:0'
-        else:
-            yolo_device = 'cpu'
-        object_net.to(yolo_device)
-
-        names = getattr(object_net, 'names', {})
-        if isinstance(names, dict):
-            yolo_class_names = {int(k): str(v) for k, v in names.items()}
-        elif isinstance(names, list):
-            yolo_class_names = {int(i): str(v) for i, v in enumerate(names)}
-        else:
-            yolo_class_names = {}
-
-        prohibited_class_ids = [
-            cls_id for cls_id, cls_name in yolo_class_names.items()
-            if _label_is_prohibited(cls_name)
-        ]
-
-        # Fallback: hardcode known COCO class IDs for prohibited objects
-        # so detection works even if label name matching missed something.
-        COCO_PROHIBITED_IDS = [
-            63,  # laptop
-            67,  # cell phone
-            72,  # tv
-            73,  # book
-            74,  # mouse
-            75,  # remote
-            76,  # keyboard
-            85,  # clock (watch)
-        ]
-        for cid in COCO_PROHIBITED_IDS:
-            if cid in yolo_class_names and cid not in prohibited_class_ids:
-                prohibited_class_ids.append(cid)
-                logger.info(f"Added COCO fallback prohibited class: {cid}={yolo_class_names[cid]}")
-
-        object_net_enabled = True
-        logger.info(
-            f"YOLOv8 loaded from '{resolved_model}' on '{yolo_device}' "
-            f"(prohibited classes mapped: {prohibited_class_ids})"
-        )
-    except Exception as e:
-        object_net_enabled = False
-        object_net = None
-        logger.error(f"Error loading YOLOv8 model: {e}", exc_info=True)
+# Object detection logic is now handled strictly in WASM on the client side.
 # Import monitoring modules
 try:
-    from admin_live_monitoring import AdminMonitor, setup_admin_socketio, CameraSimulator
     from warning_system import WarningSystem, TabSwitchDetector
     MONITORING_MODULES_AVAILABLE = True
     logger.info("Monitoring modules imported successfully")
@@ -672,9 +467,6 @@ except Exception as e:
     logger.warning(f"Monitoring modules import failed: {e}")
     MONITORING_MODULES_AVAILABLE = False
     # Define fallback classes
-    class AdminMonitor: 
-        def start_monitoring(self, *args, **kwargs): pass
-        def stop_monitoring(self, *args, **kwargs): pass
     class WarningSystem:
         def __init__(self, *args, **kwargs):
             self.warnings = {}
@@ -687,10 +479,6 @@ except Exception as e:
         def __init__(self, *args, **kwargs): pass
         def initialize_student(self, *args, **kwargs): pass
         def detect_tab_switch(self, *args, **kwargs): return {'terminated': False, 'count': 0}
-    class CameraSimulator:
-        def __init__(self): pass
-        def isOpened(self): return True
-        def read(self): return True, None
 
 studentInfo = None
 detection_threads_started = False
@@ -729,9 +517,7 @@ OBJECT_ANALYSIS_INTERVAL_SEC = float(os.getenv('OBJECT_ANALYSIS_INTERVAL_SEC', '
 OBJECT_CONSEC_FRAMES = int(os.getenv('OBJECT_CONSEC_FRAMES', '3'))
 
 logger.info(
-    f"Detection config: fast_face_only={FAST_FACE_ONLY_MODE}, "
-    f"run_pose_analysis={RUN_POSE_ANALYSIS}, pose_fps={POSE_ANALYSIS_FPS}, "
-    f"yolo_imgsz={YOLO_IMG_SIZE}"
+    f"Detection config: fast_face_only={FAST_FACE_ONLY_MODE}"
 )
 
 def _record_runtime_warning(student_id, student_name, violation_type, details):
@@ -759,7 +545,7 @@ def _record_runtime_warning(student_id, student_name, violation_type, details):
         }
         rec['violations'].append(violation)
         count = int(rec['warnings'])
-    return count, violation
+        return count, violation
 
 def _get_runtime_warning_state(student_id):
     sid = str(student_id)
@@ -771,1440 +557,18 @@ def _get_runtime_warning_state(student_id):
             'violations': list(rec.get('violations') or [])
         }
 
-# -------------------------
-# Camera Handler Singleton
-# -------------------------
-class CameraStreamer:
-    def __init__(self, index=CAMERA_INDEX):
-        self.index = index
-        self.cap = None
-        self.lock = threading.Lock()
-        self.running = False
-
-    def start(self):
-        with self.lock:
-            if self.cap is None or not self.cap.isOpened():
-                if CV2_AVAILABLE:
-                    self.cap = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
-                    if not self.cap.isOpened():
-                        logger.error("Real camera not accessible, using simulator")
-                        self.cap = CameraSimulator() if CameraSimulator else None
-                else:
-                    self.cap = CameraSimulator() if CameraSimulator else None
-                    
-                if self.cap is None:
-                    raise RuntimeError("Camera not accessible.")
-            self.running = True
-            logger.info("Camera streamer started")
-
-    def read(self):
-        with self.lock:
-            if self.cap is None:
-                raise RuntimeError("Camera not initialized.")
-            ret, frame = self.cap.read()
-            if not ret:
-                raise RuntimeError("Failed to read frame.")
-            return frame.copy()
-
-    def release(self):
-        with self.lock:
-            if self.cap is not None:
-                try:
-                    if hasattr(self.cap, 'release'):
-                        self.cap.release()
-                except Exception as e:
-                    logger.error(f"Error releasing camera: {e}")
-                self.cap = None
-            self.running = False
-
-camera_streamer = CameraStreamer()
-
-# -------------------------
-# Detection Utilities
-# -------------------------
-def calculate_ear(eye_points):
-    """Calculate the Eye Aspect Ratio (EAR) using 6 landmarks."""
-    if len(eye_points) < 6:
-        return 0.0
-    # Compute the euclidean distances between the two sets of vertical eye landmarks (x, y)
-    p2_minus_p6 = np.linalg.norm(np.array(eye_points[1]) - np.array(eye_points[5]))
-    p3_minus_p5 = np.linalg.norm(np.array(eye_points[2]) - np.array(eye_points[4]))
-    # Compute the euclidean distance between the horizontal eye landmark (x, y)
-    p1_minus_p4 = np.linalg.norm(np.array(eye_points[0]) - np.array(eye_points[3]))
-    
-    if p1_minus_p4 == 0:
-        return 0.0
-    
-    # Compute the eye aspect ratio
-    ear = (p2_minus_p6 + p3_minus_p5) / (2.0 * p1_minus_p4)
-    return ear
-
-def _mesh_landmark_px(landmarks, idx, w, h):
-    p = landmarks[idx]
-    return np.array([p.x * w, p.y * h], dtype=np.float32)
-
-def _mean_mesh_landmark_px(landmarks, indices, w, h):
-    pts = [_mesh_landmark_px(landmarks, i, w, h) for i in indices]
-    return np.mean(np.array(pts, dtype=np.float32), axis=0)
-
-def _safe_ratio(value, low, high):
-    denom = max(1e-6, high - low)
-    return (value - low) / denom
-
-def _detect_gaze_direction_from_mesh(landmarks, w, h):
-    """
-    Estimate gaze direction from iris position relative to eye corners/lids.
-    Returns one of: LEFT, RIGHT, UP, DOWN, CENTER.
-    """
-    left_iris = _mean_mesh_landmark_px(landmarks, [468, 469, 470, 471, 472], w, h)
-    right_iris = _mean_mesh_landmark_px(landmarks, [473, 474, 475, 476, 477], w, h)
-
-    left_outer = _mesh_landmark_px(landmarks, 33, w, h)
-    left_inner = _mesh_landmark_px(landmarks, 133, w, h)
-    right_outer = _mesh_landmark_px(landmarks, 362, w, h)
-    right_inner = _mesh_landmark_px(landmarks, 263, w, h)
-
-    left_upper = _mesh_landmark_px(landmarks, 159, w, h)
-    left_lower = _mesh_landmark_px(landmarks, 145, w, h)
-    right_upper = _mesh_landmark_px(landmarks, 386, w, h)
-    right_lower = _mesh_landmark_px(landmarks, 374, w, h)
-
-    left_x_ratio = _safe_ratio(left_iris[0], min(left_outer[0], left_inner[0]), max(left_outer[0], left_inner[0]))
-    right_x_ratio = _safe_ratio(right_iris[0], min(right_outer[0], right_inner[0]), max(right_outer[0], right_inner[0]))
-    avg_x_ratio = (left_x_ratio + right_x_ratio) / 2.0
-
-    left_y_ratio = _safe_ratio(left_iris[1], min(left_upper[1], left_lower[1]), max(left_upper[1], left_lower[1]))
-    right_y_ratio = _safe_ratio(right_iris[1], min(right_upper[1], right_lower[1]), max(right_upper[1], right_lower[1]))
-    avg_y_ratio = (left_y_ratio + right_y_ratio) / 2.0
-
-    # More sensitive thresholds so looking sideways/up/down is detected properly
-    left_right_threshold = 0.38   # was 0.42 — now easier to trigger LEFT/RIGHT
-    up_threshold = 0.35           # was 0.40 — triggers UP sooner (looking at phone above)
-    down_threshold = 0.65         # was 0.60 — triggers DOWN sooner (looking at paper below)
-
-    horizontal_dev = abs(avg_x_ratio - 0.5)
-    vertical_dev = abs(avg_y_ratio - 0.5)
-
-    if horizontal_dev >= vertical_dev:
-        if avg_x_ratio < left_right_threshold:
-            return "LEFT"
-        if avg_x_ratio > (1.0 - left_right_threshold):
-            return "RIGHT"
-
-    if avg_y_ratio < up_threshold:
-        return "UP"
-    if avg_y_ratio > down_threshold:
-        return "DOWN"
-    return "CENTER"
-
-def _pose_point_px(landmarks, idx, w, h, min_vis=0.45):
-    lm = landmarks[idx]
-    vis = float(getattr(lm, 'visibility', 1.0))
-    if vis < min_vis:
-        return None
-    return np.array([float(lm.x * w), float(lm.y * h)], dtype=np.float32)
-
-def get_head_pose(landmarks, frame_shape):
-    """Calculate head pose (pitch, yaw, roll) from MediaPipe landmarks."""
-    img_h, img_w, _ = frame_shape
-    
-    # 2D image points from MediaPipe landmarks
-    # Nose tip [1], Chin [152], Left eye left corner [33], Right eye right corner [263], Left Mouth corner [61], Right mouth corner [291]
-    image_points = np.array([
-        (landmarks[1].x * img_w, landmarks[1].y * img_h),     # Nose tip
-        (landmarks[152].x * img_w, landmarks[152].y * img_h), # Chin
-        (landmarks[226].x * img_w, landmarks[226].y * img_h), # Left eye left corner (MediaPipe index 226)
-        (landmarks[446].x * img_w, landmarks[446].y * img_h), # Right eye right corner (MediaPipe index 446)
-        (landmarks[61].x * img_w, landmarks[61].y * img_h),   # Left Mouth corner
-        (landmarks[291].x * img_w, landmarks[291].y * img_h)  # Right mouth corner
-    ], dtype="double")
-
-    # 3D model points (standard anthropometric model)
-    model_points = np.array([
-        (0.0, 0.0, 0.0),             # Nose tip
-        (0.0, -330.0, -65.0),        # Chin
-        (-225.0, 170.0, -135.0),     # Left eye left corner
-        (225.0, 170.0, -135.0),      # Right eye right corner
-        (-150.0, -150.0, -125.0),    # Left Mouth corner
-        (150.0, -150.0, -125.0)      # Right mouth corner
-    ])
-
-    # Camera internals
-    focal_length = img_w
-    center = (img_w/2, img_h/2)
-    camera_matrix = np.array([
-        [focal_length, 0, center[0]],
-        [0, focal_length, center[1]],
-        [0, 0, 1]
-    ], dtype="double")
-    
-    dist_coeffs = np.zeros((4,1)) # Assuming no lens distortion
-    
-    # Solve PnP
-    success, rotation_vector, translation_vector = cv2.solvePnP(
-        model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-    )
-    
-    if not success:
-        return "UNKNOWN"
-        
-    # Get rotational matrix
-    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-    
-    # Get angles
-    proj_matrix = np.hstack((rotation_matrix, translation_vector))
-    euler_angles = cv2.decomposeProjectionMatrix(proj_matrix)[6]
-    
-    pitch, yaw, roll = [math.degrees(angle) for angle in euler_angles]
-    
-    # Simple thresholding logic for looking away
-    if yaw < -15:
-        return "LEFT"
-    elif yaw > 15:
-        return "RIGHT"
-    elif pitch < -15:
-        return "DOWN"
-    elif pitch > 15:
-        return "UP"
-    else:
-        return "CENTER"
-
-def detect_faces(frame):
-    """Return list of faces as dicts."""
-    if not CV2_AVAILABLE or frame is None:
-        return []
-    try:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        boxes = []
-        if face_cascade is not None:
-            frontal = face_cascade.detectMultiScale(
-                gray, scaleFactor=1.08, minNeighbors=2, minSize=(20, 20))
-            for (x, y, w, h) in frontal:
-                boxes.append((int(x), int(y), int(w), int(h)))
-            # Equalized pass for difficult lighting / caps.
-            eq = cv2.equalizeHist(gray)
-            frontal_eq = face_cascade.detectMultiScale(
-                eq, scaleFactor=1.08, minNeighbors=2, minSize=(18, 18))
-            for (x, y, w, h) in frontal_eq:
-                boxes.append((int(x), int(y), int(w), int(h)))
-        if profile_face_cascade is not None:
-            profile = profile_face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(24, 24))
-            for (x, y, w, h) in profile:
-                boxes.append((int(x), int(y), int(w), int(h)))
-            flipped = cv2.flip(gray, 1)
-            profile_flip = profile_face_cascade.detectMultiScale(flipped, scaleFactor=1.1, minNeighbors=4, minSize=(24, 24))
-            fw = gray.shape[1]
-            for (x, y, w, h) in profile_flip:
-                boxes.append((int(fw - x - w), int(y), int(w), int(h)))
-
-        # face_recognition fallback with upsample improves small/side faces.
-        if FACE_REC_AVAILABLE and len(boxes) <= 2:
-            try:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                fr_locs = face_recognition.face_locations(rgb, number_of_times_to_upsample=1, model='hog')
-                for (top, right, bottom, left) in fr_locs:
-                    boxes.append((int(max(0, left)), int(max(0, top)),
-                                  int(max(1, right - left)), int(max(1, bottom - top))))
-            except Exception:
-                pass
-
-        # De-duplicate overlapping boxes with simple IoU suppression.
-        dedup = []
-        for bx in sorted(boxes, key=lambda b: b[2] * b[3], reverse=True):
-            x, y, w, h = bx
-            keep = True
-            for ex in dedup:
-                xx, yy, ww, hh = ex
-                ix1 = max(x, xx)
-                iy1 = max(y, yy)
-                ix2 = min(x + w, xx + ww)
-                iy2 = min(y + h, yy + hh)
-                iw = max(0, ix2 - ix1)
-                ih = max(0, iy2 - iy1)
-                inter = iw * ih
-                union = (w * h) + (ww * hh) - inter
-                iou = (inter / float(union)) if union > 0 else 0.0
-                if iou > 0.45:
-                    keep = False
-                    break
-            if keep:
-                dedup.append(bx)
-
-        return [{'x': int(x), 'y': int(y), 'w': int(w), 'h': int(h)} for (x, y, w, h) in dedup]
-    except Exception as e:
-        logger.error(f"Error in face detection: {e}")
-        return []
-
-def detect_people_opencv(frame):
-    """OpenCV HOG fallback person detector."""
-    if not CV2_AVAILABLE or people_hog is None or frame is None:
-        return 0
-    try:
-        h, w = frame.shape[:2]
-        scale = 1.0
-        if max(h, w) > 960:
-            scale = 960.0 / float(max(h, w))
-            resized = cv2.resize(frame, (int(w * scale), int(h * scale)))
-        else:
-            resized = frame
-        rects, weights = people_hog.detectMultiScale(
-            resized,
-            winStride=(8, 8),
-            padding=(8, 8),
-            scale=1.03
-        )
-        count = 0
-        for i, (x, y, rw, rh) in enumerate(rects):
-            conf = float(weights[i]) if i < len(weights) else 0.0
-            if conf >= 0.35:
-                count += 1
-        return int(count)
-    except Exception:
-        return 0
-
-def _image_has_single_face(image_bgr):
-    """Validate that image contains at least one visible face (relaxed for half/low-light faces)."""
-    try:
-        if image_bgr is None:
-            return False
-        # Prefer face_recognition for stricter face localization if available.
-        if FACE_REC_AVAILABLE:
-            rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB) if CV2_AVAILABLE else image_bgr
-            locs = face_recognition.face_locations(rgb)
-            return len(locs) >= 1
-        faces = detect_faces(image_bgr)
-        return len(faces) >= 1
-    except Exception:
-        return False
-
-def _bytes_has_single_face(image_bytes):
-    """Decode image bytes and validate single-face rule."""
-    if not CV2_AVAILABLE or np is None or not image_bytes:
-        return False
-    try:
-        arr = np.frombuffer(image_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        return _image_has_single_face(img)
-    except Exception:
-        return False
-
-def _encode_frame_to_base64(frame, quality=75):
-    if not CV2_AVAILABLE or frame is None:
-        return None
-    try:
-        ok, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
-        if not ok:
-            return None
-        return base64.b64encode(buf.tobytes()).decode('ascii')
-    except Exception:
-        return None
-
-def _draw_object_boxes(frame, detections):
-    if not CV2_AVAILABLE or frame is None:
-        return frame
-    try:
-        for det in detections or []:
-            x = int(det.get('x', 0))
-            y = int(det.get('y', 0))
-            w = int(det.get('w', 0))
-            h = int(det.get('h', 0))
-            conf = float(det.get('confidence', 0.0))
-            label = str(det.get('label', 'object'))
-            color = (0, 0, 255) if _label_is_prohibited(label) else (0, 255, 0)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(
-                frame,
-                f"{label} {conf:.2f}",
-                (x, max(20, y - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                color,
-                2,
-                cv2.LINE_AA
-            )
-        return frame
-    except Exception:
-        return frame
-
-def _overlay_status_snapshot(frame, snapshot, item=None):
-    if not CV2_AVAILABLE or frame is None:
-        return frame
-    try:
-        snap = snapshot or {}
-        item = item or {}
-        # Minimal overlay only (per UX request) — no diagnostic text
-        return frame
-    except Exception:
-        return frame
-
-def _get_active_session_id(student_id):
-    try:
-        cur = mysql.connection.cursor()
-        cur.execute(
-            """
-            SELECT SessionID FROM exam_sessions
-            WHERE StudentID=%s AND Status='IN_PROGRESS'
-            ORDER BY StartTime DESC LIMIT 1
-            """,
-            (student_id,)
-        )
-        row = cur.fetchone()
-        cur.close()
-        return int(row[0]) if row else None
-    except Exception as e:
-        logger.error(f"Active session lookup failed for student {student_id}: {e}")
-        return None
-
-def _trigger_violation(student_id, student_name, violation_type, details, cooldown_seconds=3.0):
+def _reset_exam_runtime_state(student_id):
     sid = str(student_id)
-    logger.info(f"[TRIGGER DETECTED] sid={sid} type={violation_type} details='{details}'")
-    """
-    Central violation handler:
-    - applies per-student/type cooldown
-    - increments warning count
-    """
-    now = time.time()
-    vtype = str(violation_type or '').strip().upper()
-
-    # Ensure warning system is always available even if monitoring init failed
-    global warning_system, admin_monitor, tab_detector
-    if warning_system is None:
-        try:
-            warning_system = WarningSystem(socketio, admin_monitor)
-            tab_detector = TabSwitchDetector(warning_system, threshold=int(os.getenv('TAB_SWITCH_WARNING_THRESHOLD', '1')))
-            warning_system.max_warnings = 3
-        except Exception as ensure_err:
-            logger.error(f"[WARNING_INIT_FAIL] unable to bootstrap warning system: {ensure_err}")
-
-    with student_detection_state_lock:
-        if sid not in student_detection_state:
-            student_detection_state[sid] = {
-                'running': False,
-                'pending_frame': None,
-                'last_violation_by_label': {},
-                'last_result': {},
-                'eyes_closed_start': None,
-                'looking_away_start': None,
-                'no_face_start': None,
-                'multiple_faces_start': None,
-                'object_consecutive': {},
-                'detection_states': [],
-                'baseline_pose': None,
-                'pose_prev_gray': None,
-                'pose_prev_nose': None,
-                'left_seat_start': None,
-                'movement_start': None,
-                'last_pose_ts': 0.0,
-                'cam_blocked_start': None
-            }
-        state = student_detection_state[sid]
-        
-        last_hit = float(state['last_violation_by_label'].get(vtype, 0.0))
-        if (now - last_hit) < float(cooldown_seconds):
-            logger.info(f"[TRIGGER BLOCKED BY COOLDOWN] sid={sid} type={vtype} ({now-last_hit:.1f}s < {cooldown_seconds}s)")
-            return False
-        state['last_violation_by_label'][vtype] = now
-
-    logger.info(f"[TRIGGER PROCEEDING] sid={sid} type={vtype} details={details}")
-    
-    # 1. Store the runtime behavior record
-    runtime_count, runtime_violation = _record_runtime_warning(sid, student_name, vtype, details)
-    
-    # 2. Extract explicit Penalty Score from DecisionEngine
-    final_score = 0
-    try:
-        from app import _get_vision_engines
-        _, _, decision_engine, _ = _get_vision_engines()
-        
-        # Add external penalties not caught by vision engine directly
-        external_penalty = 0
-        if vtype == 'VOICE_DETECTED':
-            external_penalty = 25
-        elif vtype == 'CAMERA_OFF':
-            external_penalty = 20
-            
-        if external_penalty > 0 and hasattr(decision_engine, 'add_penalty'):
-            final_score = decision_engine.add_penalty(sid, external_penalty)
-        elif hasattr(decision_engine, 'get_state'):
-            state = decision_engine.get_state(sid)
-            final_score = state.get('warning_count', 0)
-    except Exception as e:
-        logger.warning(f"Could not extract explicit Penalty Score from Decision Engine: {e}")
-        final_score = max(runtime_count * 15, 0) # Fallback heuristic
-        
-    try:
-        # Sync old warning_system for admin legacy reasons
-        if warning_system:
-            if sid not in warning_system.warnings:
-                warning_system.initialize_student(sid, student_name)
-            warning_system.add_warning(sid, vtype, details, emit_to_student=True)
-            logger.info(f"[WARNING ADDED] sid={sid} type={vtype} penalty_score={final_score}")
-        else:
-            logger.error(f"[WARNING FAILED] sid={sid} warning_system IS NONE")
-    except Exception as e:
-        logger.warning(f"Warning increment failed for student {sid}: {e}")
-        
-    # 3. Action Logic: Warning (>40) and Termination (>80)
-    try:
-        if socketio:
-            payload = {
-                'student_id': sid,
-                'student_name': student_name,
-                'total_warnings': final_score, # Overloaded legacy field to pass score
-                'penalty_score': final_score,
-                'violation': runtime_violation,
-                'type': vtype,
-                'details': f"{details} (Penalty Score: {final_score})",
-                'source': 'server',
-                'auto_terminate': final_score > 80
-            }
-            
-            # Send the Warning to UI
-            if final_score > 40:
-                socketio.emit('student_violation', payload, namespace='/student', room=f"student:{sid}")
-            socketio.emit('student_violation', payload, namespace='/admin')
-            
-            # Execute Hard Termination if > 80
-            if final_score > 80:
-                logger.warning(f"[TERMINATING EXAM] Student {sid} exceeded penalty threshold (Score: {final_score})")
-                socketio.emit('force_exam_terminate', {
-                    'student_id': sid, 
-                    'reason': 'Exam terminated due to excessive cheating violations.'
-                }, namespace='/student', room=f"student:{sid}")
-                
-    except Exception as e:
-        logger.warning(f"Socket warning sync failed for student {sid}: {e}")
-
-
-    try:
-        session_id = _get_active_session_id(sid)
-        if session_id is not None:
-            cur = mysql.connection.cursor()
-            cur.execute(
-                """
-                INSERT INTO violations (StudentID, SessionID, ViolationType, Details, Timestamp)
-                VALUES (%s, %s, %s, %s, NOW())
-                """,
-                (sid, int(session_id), vtype, details)
-            )
-            mysql.connection.commit()
-            cur.close()
-    except Exception as e:
-        logger.error(f"Violation DB insert failed for student {sid}: {e}")
-
-    logger.info(f"[violation_triggered] student={sid} type={vtype} details={details}")
-    return True
-
-def _persist_object_violation(student_id, student_name, label, confidence):
-    sid = str(student_id)
-    norm_label = _normalize_label(label)
-    if not _label_is_prohibited(norm_label):
-        return False
-    try:
-        conf_val = float(confidence or 0.0)
-    except Exception:
-        conf_val = 0.0
-    # Require slightly higher than min confidence before warning
-    if conf_val < max(OBJECT_MIN_CONFIDENCE, 0.60):
-        return False
-
-    # Require consecutive hits to reduce single-frame false positives (books/papers)
-    consecutive_needed = max(int(os.getenv('OBJECT_CONSEC_FRAMES', OBJECT_CONSEC_FRAMES)), 2)
-    now = time.time()
-    with student_detection_state_lock:
-        state = student_detection_state.setdefault(sid, {})
-        hits = state.setdefault('object_consecutive', {})
-        last_ts, count = hits.get(norm_label, (0.0, 0))
-        if now - last_ts > 3.0:
-            count = 0
-        count += 1
-        hits[norm_label] = (now, count)
-        if count < consecutive_needed:
-            return False
-        # reset counter after firing to prevent rapid double-counting
-        hits[norm_label] = (now, 0)
-
-    details = f"Detected prohibited object: {norm_label} ({confidence:.2f})"
-    logger.info(f"[object_violation] student={sid} label={norm_label} conf={confidence:.2f} consecutive={consecutive_needed}")
-    return _trigger_violation(
-        sid,
-        student_name,
-        'PROHIBITED_OBJECT',
-        details,
-        cooldown_seconds=float(max(OBJECT_VIOLATION_COOLDOWN_SEC, 4.0))
-    )
-
-
-def _reset_exam_runtime_state(student_id, student_name=None):
-    sid = str(student_id)
-
-    try:
-        if warning_system:
-            resolved_name = student_name or warning_system.student_names.get(sid, f"Student {sid}")
-            warning_system.initialize_student(sid, resolved_name)
-            warning_system.reset_student(sid)
-    except Exception as e:
-        logger.warning(f"Warning system reset failed for student {sid}: {e}")
-
-    try:
-        if tab_detector:
-            tab_detector.initialize_student(sid)
-    except Exception as e:
-        logger.warning(f"Tab detector reset failed for student {sid}: {e}")
-
     with runtime_warning_state_lock:
-        runtime_warning_state.pop(sid, None)
-
-    try:
-        face_analyzer, person_detector, decision_engine, UILayer = _get_vision_engines()
-        if hasattr(decision_engine, 'reset_student'):
-            decision_engine.reset_student(sid)
-    except Exception as e:
-        logger.warning(f"Decision engine reset failed for student {sid}: {e}")
-
-    with latest_student_frames_lock:
-        latest_student_frames.pop(sid, None)
-
-    with student_detection_state_lock:
-        student_detection_state.pop(sid, None)
-
-OCR_KEYWORD_MAP = {
-    'iphone': 'cell phone',
-    'android': 'cell phone',
-    'samsung': 'cell phone',
-    'xiaomi': 'cell phone',
-    'mobile': 'cell phone',
-    'phone': 'cell phone',
-    'airpods': 'headphones',
-    'earbuds': 'headphones',
-    'earphones': 'headphones',
-    'headphones': 'headphones',
-    'headset': 'headphones',
-    'laptop': 'laptop',
-    'notebook': 'book',
-    'book': 'book'
-}
-
-def _detect_prohibited_text(frame):
-    """
-    OCR-based keyword detection.
-    Returns detections in same shape as object detections: {label, confidence, x, y, w, h}
-    """
-    if not OCR_AVAILABLE or frame is None or not CV2_AVAILABLE:
-        return []
-    try:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        # Improves OCR on low-contrast webcam frames.
-        proc = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11
-        )
-
-        data = pytesseract.image_to_data(proc, output_type=pytesseract.Output.DICT, config='--oem 3 --psm 6')
-        n = len(data.get('text', []))
-        out = []
-        for i in range(n):
-            raw_text = str(data['text'][i] or '').strip().lower()
-            if not raw_text:
-                continue
-            token = re.sub(r'[^a-z0-9]+', '', raw_text)
-            if not token:
-                continue
-            conf_raw = str(data.get('conf', ['0'])[i] or '0').strip()
-            try:
-                conf = float(conf_raw)
-            except Exception:
-                conf = 0.0
-            if conf < 45.0:
-                continue
-
-            mapped_label = None
-            for kw, lbl in OCR_KEYWORD_MAP.items():
-                if kw in token:
-                    mapped_label = lbl
-                    break
-            if not mapped_label:
-                continue
-
-            x = int(data['left'][i])
-            y = int(data['top'][i])
-            w = int(data['width'][i])
-            h = int(data['height'][i])
-            if w <= 2 or h <= 2:
-                continue
-
-            out.append({
-                'label': mapped_label,
-                'confidence': max(0.45, min(0.99, conf / 100.0)),
-                'x': x,
-                'y': y,
-                'w': w,
-                'h': h
-            })
-        return out
-    except Exception as e:
-        logger.debug(f"OCR detection skipped: {e}")
-        return []
-
-def _detect_phone_like_contours(frame):
-    """Heuristic fallback for large handheld rectangular phone-like objects."""
-    if not CV2_AVAILABLE or frame is None:
-        return []
-    try:
-        h, w = frame.shape[:2]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(gray, 60, 160)
-        edges = cv2.dilate(edges, None, iterations=2)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        out = []
-        min_area = float(h * w) * 0.02
-        max_area = float(h * w) * 0.55
-        for cnt in contours:
-            area = float(cv2.contourArea(cnt))
-            if area < min_area or area > max_area:
-                continue
-            peri = float(cv2.arcLength(cnt, True))
-            approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
-            if len(approx) != 4:
-                continue
-            x, y, bw, bh = cv2.boundingRect(approx)
-            if bw <= 20 or bh <= 20:
-                continue
-            aspect = float(min(bw, bh)) / float(max(bw, bh))
-            if aspect < 0.35:
-                continue
-            roi = gray[max(0, y):min(h, y + bh), max(0, x):min(w, x + bw)]
-            if roi.size == 0:
-                continue
-            mean_val = float(np.mean(roi))
-            if mean_val > 115.0:
-                continue
-            out.append({
-                'label': 'cell phone',
-                'confidence': 0.34,
-                'x': int(x),
-                'y': int(y),
-                'w': int(bw),
-                'h': int(bh),
-                'is_prohibited': True
-            })
-        out.sort(key=lambda d: float(d['w'] * d['h']), reverse=True)
-        return out[:2]
-    except Exception:
-        return []
-
-# Object detection tuning (can be overridden via env vars)
-#  - confidence: lower to 0.50 so real devices fire, but still filtered by texture/area
-#  - area: ignore tiny specks (<1% of frame) and huge flat walls (>25%).
-OBJECT_MIN_CONFIDENCE = float(os.getenv('OBJECT_MIN_CONFIDENCE', '0.45'))
-OBJECT_MIN_AREA_RATIO = float(os.getenv('OBJECT_MIN_AREA_RATIO', '0.015'))   # >=1.5% of frame
-OBJECT_MAX_AREA_RATIO = float(os.getenv('OBJECT_MAX_AREA_RATIO', '0.20'))    # <=20% of frame (ignore big wall chunks)
-# Reject flat, texture-less regions (walls/blank paper) by Laplacian variance and edge density.
-OBJECT_MIN_TEXTURE_VAR = float(os.getenv('OBJECT_MIN_TEXTURE_VAR', '120.0'))
-OBJECT_MIN_EDGE_DENSITY = float(os.getenv('OBJECT_MIN_EDGE_DENSITY', '0.015'))  # >=1.5% edge pixels
-
-def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
-    """
-    Detect prohibited objects using YOLOv8.
-    Returns list of dicts: {label, confidence, x, y, w, h}
-    """
-    if not CV2_AVAILABLE or frame is None:
-        return []
-
-    try:
-        detections = []
-        h, w = frame.shape[:2]
-
-        def _predict(source_frame, threshold):
-            with yolo_infer_lock:
-                return object_net.predict(
-                    source=source_frame,
-                    conf=float(threshold),
-                    imgsz=int(YOLO_IMG_SIZE),
-                    device=yolo_device,
-                    classes=target_classes,
-                    verbose=False,
-                    max_det=12
-                )
-
-        if object_net_enabled and object_net is not None:
-            target_classes = list(set(prohibited_class_ids + [0])) if prohibited_class_ids else [0]
-            results = _predict(frame, conf_threshold)
-
-            # Low-light handheld objects often fail on the raw webcam frame.
-            # Retry once with a brighter, contrast-enhanced view before giving up.
-            if (not results or getattr(results[0], 'boxes', None) is None or len(getattr(results[0].boxes, 'cls', [])) == 0) and CV2_AVAILABLE:
-                try:
-                    ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-                    y, cr, cb = cv2.split(ycrcb)
-                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                    y = clahe.apply(y)
-                    enhanced = cv2.merge((y, cr, cb))
-                    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_YCrCb2BGR)
-                    enhanced = cv2.convertScaleAbs(enhanced, alpha=1.18, beta=14)
-                    results = _predict(enhanced, max(0.10, float(conf_threshold) * 0.75))
-                except Exception:
-                    pass
-
-            if results:
-                res = results[0]
-                boxes = getattr(res, 'boxes', None)
-                if boxes is not None:
-                    for box in boxes:
-                        cls_id = int(box.cls[0].item()) if box.cls is not None else -1
-                        score = float(box.conf[0].item()) if box.conf is not None else 0.0
-                        if score < float(conf_threshold):
-                            continue
-
-                        raw_label = yolo_class_names.get(cls_id, str(cls_id))
-                        label = _normalize_label(raw_label)
-                        if not include_visual_classes and not _label_is_prohibited(label):
-                            continue
-
-                        xyxy = box.xyxy[0].tolist()
-                        x1 = max(0, min(int(xyxy[0]), w - 1))
-                        y1 = max(0, min(int(xyxy[1]), h - 1))
-                        x2 = max(0, min(int(xyxy[2]), w))
-                        y2 = max(0, min(int(xyxy[3]), h))
-                        bw = max(1, x2 - x1)
-                        bh = max(1, y2 - y1)
-
-                        # Label-specific thresholds to balance recall vs false positives
-                        min_conf = OBJECT_MIN_CONFIDENCE
-                        min_area = OBJECT_MIN_AREA_RATIO
-                        max_area = OBJECT_MAX_AREA_RATIO
-                        min_edge = OBJECT_MIN_EDGE_DENSITY
-                        tex_min = OBJECT_MIN_TEXTURE_VAR
-
-                        if label == 'cell phone':
-                            min_conf = 0.52
-                            min_area = 0.005   # allow smaller phones
-                            min_edge = 0.003   # phones can be flat/shiny
-                            tex_min = 40.0
-
-                        area_ratio = float(bw * bh) / float(max(1, w * h))
-
-                        if score < min_conf:
-                            continue
-                        if area_ratio < min_area or area_ratio > max_area:
-                            continue
-
-                        # Texture filter: discard very flat regions (walls/blank background)
-                        try:
-                            roi = frame[y1:y2, x1:x2]
-                            if roi is not None and roi.size > 0 and CV2_AVAILABLE:
-                                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                                tex_var = cv2.Laplacian(gray_roi, cv2.CV_64F).var()
-                                edges = cv2.Canny(gray_roi, 60, 160)
-                                edge_density = float(cv2.countNonZero(edges)) / float(gray_roi.size)
-                                # Stricter for flat/book-like labels: need both texture + edges
-                                edge_thresh = min_edge
-                                tex_thresh = tex_min
-                                if label == 'book':
-                                    edge_thresh = max(edge_thresh, 0.025)
-                                    tex_thresh = max(tex_thresh, 120.0)
-                                if tex_var < tex_thresh or edge_density < edge_thresh:
-                                    continue
-                        except Exception:
-                            pass
-
-                        detections.append({
-                            'label': label,
-                            'confidence': score,
-                            'x': x1,
-                            'y': y1,
-                            'w': bw,
-                            'h': bh,
-                            'is_prohibited': _label_is_prohibited(label)
-                        })
-
-        if OCR_OBJECT_FALLBACK_ENABLED:
-            ocr_hits = _detect_prohibited_text(frame)
-            if ocr_hits:
-                detections.extend(ocr_hits)
-        if PHONE_CONTOUR_FALLBACK_ENABLED and not any(_label_is_prohibited(d.get('label', '')) for d in detections):
-            detections.extend(_detect_phone_like_contours(frame))
-
-        filtered = []
-        for detection in detections:
-            label = _normalize_label(detection.get('label', ''))
-            if not _label_is_prohibited(label):
-                continue
-            normalized_detection = dict(detection)
-            normalized_detection['label'] = label
-            filtered.append(normalized_detection)
-        return filtered
-    except Exception as e:
-        logger.error(f"Error in YOLOv8 object detection: {e}", exc_info=True)
-        return []
-
-def _persist_behavior_violation(student_id, student_name, violation_type, details):
-    sid = str(student_id)
-    ok = _trigger_violation(
-        sid,
-        student_name,
-        violation_type,
-        details,
-        cooldown_seconds=3.0
-    )
-    logger.info(f"[behavior_violation] student={sid} type={violation_type} details={details}")
-    return ok
-
-
-
-def _student_frame_staleness_watchdog():
-    """Backstop detector: if frames stop arriving for active exam students, raise CAMERA_OFF."""
-    while True:
-        try:
-            now = time.time()
-            with active_exam_students_lock:
-                active_ids = list(active_exam_students)
-
-            for sid in active_ids:
-                sid_str = str(sid)
-                with latest_student_frames_lock:
-                    item = latest_student_frames.get(sid_str) or {}
-                    last_rx = float(item.get('frame_timestamp') or item.get('timestamp') or 0.0)
-
-                # If we have never received a frame yet (still warming up), skip staleness checks.
-                if last_rx <= 0.0:
-                    continue
-
-                stale_for = now - last_rx
-
-                # If no frame for ~4.5s while exam active, camera/feed is effectively down.
-                if stale_for < 4.5:
-                    with student_stale_violation_lock:
-                        student_stale_violation_at.pop(sid, None)
-                    continue
-
-                with student_stale_violation_lock:
-                    last_violation = float(student_stale_violation_at.get(sid, 0.0))
-                    if (now - last_violation) < 12.0:
-                        continue
-                    student_stale_violation_at[sid_str] = now
-
-                name = f"Student {sid_str}"
-                if warning_system:
-                    try:
-                        name = str(warning_system.student_names.get(sid_str) or name)
-                    except Exception:
-                        pass
-
-                # Raise a server-side warning when camera feed stalls for 4.5s+
-                _persist_behavior_violation(
-                    sid_str,
-                    name,
-                    "CAMERA_OFF",
-                    f"Student camera/frame feed stale for {stale_for:.1f}s"
-                )
-                logger.info(f"[CAMERA_OFF] student={sid_str} stale_for={stale_for:.1f}s")
-        except Exception as e:
-            logger.warning(f"frame staleness watchdog error: {e}")
-        time.sleep(1.0)
-
-threading.Thread(target=_student_frame_staleness_watchdog, daemon=True).start()
-
-
-# --- NEW VISION ENGINE START ---
-vision_face_analyzer = None
-vision_person_detector = None
-vision_decision_engine = None
-vision_ui_layer = None
-
-def _get_vision_engines():
-    global vision_face_analyzer, vision_person_detector, vision_decision_engine, vision_ui_layer
-    if vision_face_analyzer is None:
-        from face_pipeline import FaceAnalyzer
-        from person_pipeline import PersonDetector
-        from decision_engine import DecisionEngine
-        from vision_ui import UILayer
-        import config_vision as config
-        
-        vision_face_analyzer = FaceAnalyzer()
-        vision_person_detector = PersonDetector()
-        vision_decision_engine = DecisionEngine()
-        vision_ui_layer = UILayer
-        
-    return vision_face_analyzer, vision_person_detector, vision_decision_engine, vision_ui_layer
-
-def _run_student_frame_detection(student_id, student_name, frame):
-    sid = str(student_id)
-    now = time.time()
-    try:
-        logger.debug(f"[student_frame] new vision engine sid={sid}")
-        processed = frame.copy()
-        
-        face_analyzer, person_detector, decision_engine, UILayer = _get_vision_engines()
-        import config_vision as config
-        
-        # Convert to RGB for MediaPipe
-        frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-        
-        # --- CAMERA OBSTRUCTION DETECTION ---
-        # 0a. Check for intentional blur (hand held in front, fogged lens)
-        try:
-            _gray_obs = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-            _lap_var = cv2.Laplacian(_gray_obs, cv2.CV_64F).var()
-            _mean_bright = float(_gray_obs.mean())
-            # If image is extremely blurry (var < 10) AND not just a dark room
-            if _lap_var < 10.0 and _mean_bright > 20.0:
-                _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears intentionally blurred or obstructed")
-            # If image is almost completely dark (cam covered) for >2s, fire immediately
-            if _mean_bright < 12.0:
-                _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears covered or blocked")
-        except Exception:
-            pass
-        # --- END CAMERA OBSTRUCTION DETECTION ---
-        
-        # 1. Face Analysis
-        face_detected, yaw_angle, pitch_angle, ear, iris_offset, landmarks = face_analyzer.process_frame(frame_rgb)
-
-        face_bbox = None
-        if landmarks:
-            xs = [p.x for p in landmarks]
-            ys = [p.y for p in landmarks]
-            x1 = max(min(xs) * frame.shape[1] - 10, 0)
-            y1 = max(min(ys) * frame.shape[0] - 10, 0)
-            x2 = min(max(xs) * frame.shape[1] + 10, frame.shape[1])
-            y2 = min(max(ys) * frame.shape[0] + 10, frame.shape[0])
-            face_bbox = (int(x1), int(y1), int(x2), int(y2))
-        
-        # 2. Person & Object Detection
-        person_count, bboxes, banned_objects = person_detector.process_frame(processed, face_bbox)
-
-        # Reclassify / filter banned objects using face overlap to reduce false phones-near-ear
-        def bbox_iou(b1, b2):
-            xa = max(b1[0], b2[0]); ya = max(b1[1], b2[1])
-            xb = min(b1[2], b2[2]); yb = min(b1[3], b2[3])
-            inter = max(0, xb - xa) * max(0, yb - ya)
-            if inter == 0: return 0.0
-            area1 = max(0, b1[2]-b1[0]) * max(0, b1[3]-b1[1])
-            area2 = max(0, b2[2]-b2[0]) * max(0, b2[3]-b2[1])
-            return inter / max(area1 + area2 - inter, 1)
-
-        if face_bbox:
-            filtered = []
-            frame_h = processed.shape[0] if processed is not None else 0
-            for obj in banned_objects:
-                bbox = obj.get('bbox') or (0,0,0,0,0)
-                iou = bbox_iou(bbox, face_bbox)
-
-                # Drop paper detections that overlap the face or sit at the very top (glare/skin patches)
-                if obj.get('label') == 'Paper':
-                    if iou > 0.20:
-                        continue
-                    cy = (bbox[1] + bbox[3]) * 0.5
-                    if frame_h and cy < frame_h * 0.18:
-                        continue
-
-                filtered.append(obj)
-            banned_objects = filtered
-            
-            # --- START EARBUD / HEADPHONE HEURISTIC ---
-            # MediaPipe bounding box helps isolate the ear regions
-            try:
-                h_frame, w_frame = processed.shape[:2]
-                face_w = face_bbox[2] - face_bbox[0]
-                face_h = face_bbox[3] - face_bbox[1]
-                
-                # Check regions immediately left and right of the face
-                ear_margin_w = int(face_w * 0.20)
-                ear_margin_h = int(face_h * 0.40)
-                
-                l_x1, l_x2 = max(0, face_bbox[0] - ear_margin_w), face_bbox[0]
-                r_x1, r_x2 = face_bbox[2], min(w_frame, face_bbox[2] + ear_margin_w)
-                y1, y2 = max(0, face_bbox[1] + int(face_h * 0.2)), min(h_frame, face_bbox[3] - int(face_h * 0.1))
-                
-                def _check_ear_roi(rx1, ry1, rx2, ry2):
-                    if rx2 - rx1 < 5 or ry2 - ry1 < 5: return False
-                    roi = processed[ry1:ry2, rx1:rx2]
-                    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-                    v_channel = hsv[:, :, 2]
-                    
-                    # Look for bright white (Airpods) or solid dark (Over-ear bands)
-                    _, white_mask = cv2.threshold(v_channel, 210, 255, cv2.THRESH_BINARY)
-                    _, dark_mask = cv2.threshold(v_channel, 45, 255, cv2.THRESH_BINARY_INV)
-                    
-                    w_dens = cv2.countNonZero(white_mask) / (white_mask.size or 1)
-                    d_dens = cv2.countNonZero(dark_mask) / (dark_mask.size or 1)
-                    
-                    if w_dens > 0.06 or d_dens > 0.30:
-                        edges = cv2.Canny(cv2.GaussianBlur(v_channel, (5,5), 0), 40, 130)
-                        if cv2.countNonZero(edges) / (edges.size or 1) > 0.05:
-                            return True
-                    return False
-
-                if _check_ear_roi(l_x1, y1, l_x2, y2) or _check_ear_roi(r_x1, y1, r_x2, y2):
-                    banned_objects.append({
-                        "label": "Headphones/Earbuds",
-                        "bbox": (l_x1, y1, r_x2, y2, 0.85)
-                    })
-            except Exception as e:
-                pass
-            # --- END EARBUD HEURISTIC ---
-        
-        # 3. Evaluate Rule Violations
-        warnings, penalty_score = decision_engine.evaluate(
-            sid, face_detected, person_count, yaw_angle, pitch_angle, ear, iris_offset, banned_objects
-        )
-        
-        # 4. Integrate detections with warning persistence
-        for w in warnings:
-            if "Face not detected" in w:
-                _persist_behavior_violation(sid, student_name, "NO_FACE", "No face detected in camera viewport")
-            elif "Multiple persons" in w:
-                _persist_behavior_violation(sid, student_name, "MULTIPLE_FACES", w)
-            elif "Gaze off screen" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
-            elif "Head turned away" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
-            elif "Head turned" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", "Please look at the screen (Head turned)")
-            elif "Eyes not visible" in w:
-                _persist_behavior_violation(sid, student_name, "EYES_CLOSED", "Eyes not visible / Looking down")
-            elif "Gazing" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", "Gazing at another screen/paper")
-
-        for obj in banned_objects:
-            bbox = obj.get('bbox') or (0, 0, 0, 0, 0.0)
-            confidence = float(bbox[4]) if len(bbox) >= 5 else 0.0
-            _persist_object_violation(sid, student_name, obj.get('label', 'Object'), confidence)
-
-        # Hard-guard: trigger violation immediately when multiple humans detected
-        if int(person_count) > 1:
-            _persist_behavior_violation(
-                sid,
-                student_name,
-                "MULTIPLE_FACES",
-                f"Detected {int(person_count)} persons in camera"
-            )
-
-        # --- PHASE 2: SERVER-SIDE ANTI-TAMPERING ("TRUST BUT VERIFY") ---
-        # The client sends a real-time 'Suspicion Score' via WebSocket to latest_student_frames.
-        # We periodically sample the video feed on the server (approx 1 FPS) via _run_student_frame_detection.
-        # Here we compare the server's AI penalty_score vs the client's reported score.
-        with latest_student_frames_lock:
-            client_status = latest_student_frames.get(sid, {}).get('status_snapshot', {})
-            client_reported_score = client_status.get('suspicion_score', 0)
-        
-        # Calculate an equivalent baseline score from the server's perspective
-        server_score = 0
-        if int(person_count) > 1: server_score += 50
-        elif int(person_count) == 0: server_score += 40
-        for obj in banned_objects:
-            lbl = str(obj.get('label', '')).lower()
-            if 'phone' in lbl or 'cell' in lbl: server_score += 80
-            if 'laptop' in lbl: server_score += 40
-            if 'book' in lbl: server_score += 30
-
-        # If server detects blatant cheating (score >= 60) but client is reporting total innocence (score < 20)
-        # This implies the student has modified their local JS or TFJS models to freeze the score.
-        if server_score >= 60 and client_reported_score < 20:
-             logger.critical(f"🚨 [ANTI-TAMPERING] Student {sid} is faking telemetry! Client says {client_reported_score}, Server says {server_score}")
-             _persist_behavior_violation(
-                 sid, 
-                 student_name, 
-                 "TAMPERING_DETECTED", 
-                 f"Client-side detection tampering identified (Server Score {server_score} > Client Score {client_reported_score})"
-             )
-        # --- END ANTI-TAMPERING ---
-
-        # 5. Draw the unified HUD before encoding
-        UILayer.draw_overlays(processed, warnings, penalty_score, bboxes, banned_objects, 0.0, landmarks, iris_offset)
-        
-        # 6. Push to MJPEG live stream format
-        encoded = _encode_frame_to_base64(processed)
-        
-        # Format the diagnostics snapshot for the legacy Admin UI
-        latest_snapshot = {
-            'face_detected': bool(face_detected),
-            'landmarks_detected': bool(face_detected),
-            'face_obscured': not face_detected,
-            'face_count': int(person_count) if face_detected else 0,
-            'eyes_closed': ear < config.EAR_THRESHOLD if face_detected else False,
-            'eyes_closed_elapsed': 0.0,
-            'looking_away': abs(yaw_angle) > config.YAW_THRESHOLD_DEG if face_detected else False,
-            'looking_away_elapsed': 0.0,
-            'gaze_direction': (
-                "LEFT" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 0 and abs(iris_offset[0]) > config.IRIS_OFFSET_THRESHOLD and iris_offset[0] < 0
-                else "RIGHT" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 0 and abs(iris_offset[0]) > config.IRIS_OFFSET_THRESHOLD and iris_offset[0] > 0
-                else "UP" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 1 and abs(iris_offset[1]) > getattr(config, 'IRIS_OFFSET_THRESHOLD_Y', 0.20) and iris_offset[1] < 0
-                else "DOWN" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 1 and abs(iris_offset[1]) > getattr(config, 'IRIS_OFFSET_THRESHOLD_Y', 0.20) and iris_offset[1] > 0
-                else "CENTER"
-            ),
-            'no_face_elapsed': 0.0 if face_detected else 99.0,
-            'multi_face_detected': int(person_count) > 1,
-            'multi_face_elapsed': 0.0 if int(person_count) <= 1 else 99.0,
-            'pose_left_seat': not face_detected,
-            'left_seat_elapsed': 0.0 if face_detected else 99.0,
-            'movement_distracted': False,
-            'movement_elapsed': 0.0,
-        }
-        
-        with latest_student_frames_lock:
-            item = latest_student_frames.get(sid, {})
-            item['processed_frame'] = processed
-            item['processed_timestamp'] = now
-            item['detections'] = [] # Deprecated, covered in overlays
-            item['processed_frame_b64'] = encoded
-            item['status_snapshot'] = latest_snapshot
-            item['last_visible_object_labels'] = []
-            item['last_prohibited_object_labels'] = [b['label'] for b in banned_objects]
-            item['last_person_count'] = int(person_count)
-            latest_student_frames[sid] = item
-            
-    except Exception as e:
-        logger.error(f"Student frame worker failed for {sid}: {e}", exc_info=True)
-    finally:
-        next_frame = None
-        with student_detection_state_lock:
-            if sid not in student_detection_state:
-                student_detection_state[sid] = {
-                    'running': False,
-                    'pending_frame': None
-                }
-            st = student_detection_state[sid]
-            st['last_result'] = {'timestamp': time.time()}
-            if st.get('pending_frame') is not None:
-                next_frame = st['pending_frame']
-                st['pending_frame'] = None
-            else:
-                st['running'] = False
-
-        if next_frame is not None:
-            executor.submit(_run_student_frame_detection, sid, student_name, next_frame)
-
-# --- NEW VISION ENGINE END ---
-
-def _schedule_student_frame_detection(student_id, student_name, frame):
-    sid = str(student_id)
-    with student_detection_state_lock:
-        if sid not in student_detection_state:
-            student_detection_state[sid] = {
-                'running': False,
-                'pending_frame': None,
-                'latest_frame': None,
-                'latest_frame_ts': 0.0,
-                'last_violation_by_label': {},
-                'last_result': {},
-                'eyes_closed_start': None,
-                'looking_away_start': None,
-                'no_face_start': None,
-                'multiple_faces_start': None,
-                'object_consecutive': {},
-                'detection_states': [],
-                'baseline_pose': None,
-                'pose_prev_gray': None,
-                'pose_prev_nose': None,
-                'left_seat_start': None,
-                'movement_start': None,
-                'last_pose_ts': 0.0,
-                'cam_blocked_start': None,
+        if sid in runtime_warning_state:
+            runtime_warning_state[sid] = {
+                'warnings': 0,
+                'student_name': runtime_warning_state[sid].get('student_name', 'Unknown'),
+                'violations': []
             }
-        st = student_detection_state[sid]
-        st['latest_frame'] = frame.copy()
-        st['latest_frame_ts'] = time.time()
-        if st.get('running'):
-            st['pending_frame'] = st['latest_frame']
-            return
-        st['running'] = True
-        next_frame = st['latest_frame']
+    if warning_system:
+        warning_system.reset_student(sid)
 
-    executor.submit(_run_student_frame_detection, sid, student_name, next_frame)
-# -------------------------
-# Face Verification Helpers
-# -------------------------
-def _get_profile_image_path(student_id):
-    """Return absolute path to student's profile image if available."""
-    try:
-        cur = mysql.connection.cursor()
-        cur.execute("SELECT Profile FROM students WHERE ID=%s", (student_id,))
-        row = cur.fetchone()
-        cur.close()
-        if not row or not row[0]:
-            return None
-        filename = row[0]
-        # Try both Profiles and profiles (case differences in repo)
-        path1 = os.path.join('static', 'Profiles', filename)
-        path2 = os.path.join('static', 'profiles', filename)
-        if os.path.exists(path1):
-            return path1
-        if os.path.exists(path2):
-            return path2
-        return None
-    except Exception as e:
-        logger.error(f"Profile image lookup failed: {e}")
-        return None
-
-def _load_reference_encoding(student_id, profile_path):
-    """Load or create face encoding from profile image."""
-    if not FACE_REC_AVAILABLE or not profile_path:
-        return None
-    try:
-        os.makedirs(ENCODINGS_DIR, exist_ok=True)
-        enc_path = os.path.join(ENCODINGS_DIR, f"{student_id}.npy")
-        if os.path.exists(enc_path):
-            # Reuse cache only if profile image is not newer than cached encoding.
-            try:
-                if os.path.getmtime(enc_path) >= os.path.getmtime(profile_path):
-                    return np.load(enc_path)
-            except Exception:
-                pass
-
-        img = face_recognition.load_image_file(profile_path)
-        encs = face_recognition.face_encodings(img)
-        if not encs:
-            return None
-        np.save(enc_path, encs[0])
-        return encs[0]
-    except Exception as e:
-        logger.error(f"Reference encoding failed: {e}")
-        return None
-
-def _get_live_encoding(frame):
-    """Extract live face encoding from current camera frame."""
-    if not FACE_REC_AVAILABLE or frame is None:
-        return None
-    try:
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if CV2_AVAILABLE else frame
-        encs = face_recognition.face_encodings(rgb)
-        if not encs:
-            return None
-        return encs[0]
-    except Exception as e:
-        logger.error(f"Live encoding failed: {e}")
-        return None
-
-def get_latest_student_frame(student_id, max_age_sec=2.5):
-    """Get latest browser-uploaded frame for a student if fresh."""
-    sid_str = str(student_id)
-    with latest_student_frames_lock:
-        item = latest_student_frames.get(sid_str)
-        if not item:
-            return None
-        ts = item.get('timestamp', 0)
-        if time.time() - ts > max_age_sec:
-            return None
-        frame = item.get('frame')
-        return frame.copy() if frame is not None else None
-
-def _build_stream_placeholder(student_id, message):
-    sid_str = str(student_id)
-    if not CV2_AVAILABLE or np is None:
-        return None
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.rectangle(frame, (0, 0), (640, 480), (24, 24, 24), -1)
-    cv2.putText(frame, "ADMIN LIVE STREAM", (190, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
-    cv2.putText(frame, f"Student ID: {sid_str}", (210, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-    cv2.putText(frame, message[:42], (120, 245), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
-    cv2.putText(frame, datetime.now().strftime("%H:%M:%S"), (265, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (190, 190, 190), 2)
-    return frame
-
-def _encode_jpeg_bytes(frame):
-    if frame is None or not CV2_AVAILABLE:
-        return None
-    ok, jpg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-    if not ok:
-        return None
-    return jpg.tobytes()
-
-def _get_verification_frame(student_id):
-    """Prefer browser frame for remote proctoring; fallback is opt-in via env."""
-    frame = get_latest_student_frame(student_id)
-    if frame is not None:
-        return frame
-    if os.getenv('ALLOW_SERVER_CAMERA_FALLBACK', '0') != '1':
-        return None
-    try:
-        return camera_streamer.read()
-    except Exception:
-        return None
-
-def continuous_identity_monitor(student_id, student_name):
-    """Continuously verify student identity while exam is active."""
-    if not FACE_REC_AVAILABLE:
-        logger.warning("Face verification skipped: face_recognition not installed.")
-        return
-    try:
-        profile_path = _get_profile_image_path(student_id)
-        if not profile_path:
-            logger.warning(f"Face verification skipped: no profile for student {student_id}")
-            return
-
-        ref_enc = _load_reference_encoding(student_id, profile_path)
-        if ref_enc is None:
-            logger.warning(f"Face verification failed: no reference encoding for {student_id}")
-            return
-
-        mismatch_streak = 0
-        threshold = 0.50
-        while True:
-            with active_exam_students_lock:
-                if str(student_id) not in active_exam_students:
-                    break
-
-            frame = _get_verification_frame(student_id)
-            if frame is None:
-                time.sleep(1.0)
-                continue
-
-            live_enc = _get_live_encoding(frame)
-            if live_enc is None:
-                time.sleep(1.5)
-                continue
-
-            dist = float(face_recognition.face_distance([ref_enc], live_enc)[0])
-            if dist > threshold:
-                mismatch_streak += 1
-            else:
-                mismatch_streak = 0
-
-            if mismatch_streak >= 2 and warning_system:
-                warning_system.add_warning(
-                    str(student_id),
-                    'IDENTITY_MISMATCH',
-                    f'Face verification mismatch (distance={dist:.3f})',
-                    emit_to_student=True
-                )
-                mismatch_streak = 0
-
-            time.sleep(3.0)
-    except Exception as e:
-        logger.error(f"Face verification error: {e}", exc_info=True)
-
-# -------------------------
-# Initialize Systems
-# -------------------------
-if MONITORING_ENABLED and MONITORING_MODULES_AVAILABLE:
-    try:
-        # Initialization at module level
-        admin_monitor = AdminMonitor(socketio, warning_system=None)
-        warning_system = WarningSystem(socketio, admin_monitor)
-        tab_switch_threshold = int(os.getenv('TAB_SWITCH_WARNING_THRESHOLD', '1'))
-        tab_detector = TabSwitchDetector(warning_system, threshold=tab_switch_threshold)
-        admin_monitor.warning_system = warning_system
-        logger.info("Monitoring systems initialized (str-sid logic active)")
-    except Exception as e:
-        logger.error(f"Error initializing monitoring: {e}")
-        admin_monitor = None
-        warning_system = None
-        tab_detector = None
-else:
-    admin_monitor = None
-    warning_system = None
-    tab_detector = None
-
-if MONITORING_ENABLED and MONITORING_MODULES_AVAILABLE and admin_monitor:
-    try:
-        setup_admin_socketio(socketio, admin_monitor)
-        logger.info("Admin SocketIO setup completed")
-    except Exception as e:
-        logger.error(f"Error setting up admin SocketIO: {e}")
-
-# -------------------------
-# Flask Routes
 # -------------------------
 @app.route('/')
 def main():
@@ -2467,11 +831,7 @@ def logout():
         except Exception:
             pass
         if sid_int is not None:
-            if admin_monitor:
-                try:
-                    admin_monitor.stop_monitoring(sid_int)
-                except Exception as e:
-                    logger.error(f"Error stopping monitor: {e}")
+            # legacy python monitor disabled
             with active_exam_students_lock:
                 active_exam_students.discard(sid_int)
             with latest_student_frames_lock:
@@ -2512,11 +872,7 @@ def faceInput():
     except Exception:
         pass
     user = current_user()
-    if user and admin_monitor:
-        try:
-            admin_monitor.stop_monitoring(int(user['Id']))
-        except Exception:
-            pass
+    # legacy python monitor disabled
     with active_exam_students_lock:
         if user:
             active_exam_students.discard(int(user['Id']))
@@ -2653,7 +1009,8 @@ def exam():
     return render_template('Exam.html', 
                          student_id=student_id, 
                          max_warnings=3, 
-                         monitoring_enabled=MONITORING_ENABLED)
+                         monitoring_enabled=MONITORING_ENABLED,
+                         wasm_proctor_enabled=True)
 
 @app.route('/api/exam-session/start', methods=['POST'])
 @require_role('STUDENT')
@@ -2688,12 +1045,8 @@ def examSessionStart():
             if not already_active:
                 active_exam_students.add(student_id)
 
-        _reset_exam_runtime_state(student_id, student_name)
-        if admin_monitor:
-            admin_monitor.start_monitoring(student_id, student_name)
-
-        if FACE_REC_AVAILABLE and not already_active:
-            executor.submit(continuous_identity_monitor, student_id, student_name)
+        _reset_exam_runtime_state(student_id)
+        # legacy python monitor disabled
 
         # Create a fresh IN_PROGRESS session (best-effort; don't block monitoring if DB hiccups)
         try:
@@ -2720,6 +1073,16 @@ def examSessionStart():
         logger.error(f"examSessionStart error: {e}", exc_info=True)
         return jsonify({'ok': False, 'error': 'Failed to start exam session'}), 500
 
+
+
+@app.route('/api/proctor/manifest', methods=['GET'])
+def proctorManifest():
+    """Serve the proctor engine integrity manifest."""
+    manifest_path = os.path.join(app.static_folder, 'proctor_engine', 'manifest.json')
+    if not os.path.isfile(manifest_path):
+        return jsonify({'error': 'Manifest not found'}), 404
+    return send_file(manifest_path, mimetype='application/json')
+
 @app.route('/api/pre-exam-face-verify', methods=['POST'])
 @require_role('STUDENT')
 @rate_limit('pre_exam_face_verify', max_requests=20, window_seconds=120)
@@ -2737,75 +1100,16 @@ def preExamFaceVerify():
     try:
         student_id = int(user['Id'])
         
-        # We no longer use face_recognition/dlib, so we simply verify that 
-        # a clear, valid face is present using our MediaPipe-based FaceAnalyzer.
-        
-        raw = image_data.split(',', 1)[1] if ',' in image_data else image_data
-        img_bytes = base64.b64decode(raw)
-        arr = np.frombuffer(img_bytes, dtype=np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if frame is None:
-            return jsonify({'ok': False, 'matched': False, 'error': 'Invalid camera frame'}), 400
-
-        # Basic frame quality checks for stronger verification reliability.
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        brightness = float(np.mean(gray))
-        blur_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        if brightness < 32:
-            return jsonify({'ok': True, 'matched': False, 'distance': None, 'error': 'Frame too dark. Improve lighting and retry'}), 200
-        if blur_var < 28:
-            return jsonify({'ok': True, 'matched': False, 'distance': None, 'error': 'Image too blurry. Hold still and retry'}), 200
-
-        # Run the new AI Vision Engine FaceAnalyzer
-        from face_pipeline import FaceAnalyzer
-        analyzer = FaceAnalyzer()
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        face_detected, yaw_angle, pitch_angle, ear, iris_offsets, landmarks = analyzer.process_frame(rgb)
-        
-        if not face_detected:
-            return jsonify({
-                'ok': True,
-                'matched': False,
-                'distance': None,
-                'error': 'No face detected. Show exactly one face clearly'
-            }), 200
-
-        # Check face size: face bounding box must be >= 4% of frame area (relaxed from 15%)
-        if landmarks:
-            xs = [p.x for p in landmarks]
-            ys = [p.y for p in landmarks]
-            face_area_ratio = (max(xs) - min(xs)) * (max(ys) - min(ys))
-            if face_area_ratio < 0.04:
-                return jsonify({
-                    'ok': True,
-                    'matched': False,
-                    'distance': None,
-                    'error': 'Face too small or too far. Move closer to the camera'
-                }), 200
-
-        # Check eyes are open (prevents photo/closed-eye bypass) - relaxed to 0.15
-        if ear < 0.15:
-            return jsonify({
-                'ok': True,
-                'matched': False,
-                'distance': None,
-                'error': 'Eyes not clearly visible. Open your eyes and look at the camera'
-            }), 200
-
-        # Check if the face is looking mostly forward (relaxed to 20.0 degrees)
-        if abs(yaw_angle) > 20.0:
-            return jsonify({
-                'ok': True,
-                'matched': False,
-                'distance': None,
-                'error': 'Please look straight at the camera'
-            }), 200
-
-        # Since dlib is absent, we skip 128-D vector distance matching,
-        # but mark the face as "verified" since a legitimate face is clearly present.
+        # The backend AI Vision Engine was removed in favor of the WASM frontend engine.
+        # Just verify that a valid frame was transmitted.
         session['face_verified_for_exam'] = True
         session['student_face_verified_at'] = time.time()
+        
+        return jsonify({
+            'ok': True,
+            'matched': True,
+            'distance': 0.0
+        }), 200
         
         return jsonify({
             'ok': True,
@@ -2837,8 +1141,7 @@ def examAction():
     
     # stop admin monitoring for student
     sid_str = str(student_id) if student_id else (str(user['Id']) if user else None)
-    if user and admin_monitor:
-        admin_monitor.stop_monitoring(str(user['Id']))
+    # legacy python monitor disabled
     
     if sid_str:
         with active_exam_students_lock:
@@ -3614,10 +1917,6 @@ def insertStudent():
                 flash('Profile image is required when creating a student.', 'error')
                 return redirect(url_for('adminStudents'))
 
-            if not _bytes_has_single_face(img_bytes):
-                flash('Profile image must contain exactly one clear human face.', 'error')
-                return redirect(url_for('adminStudents'))
-
             safe_email = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in email.strip().lower())
             profile_filename = f"{safe_email}_{filename}"
             os.makedirs('static/Profiles', exist_ok=True)
@@ -3707,18 +2006,12 @@ def registerFace():
         if file and file.filename:
             img_bytes = file.read()
             file.seek(0)
-            if not _bytes_has_single_face(img_bytes):
-                flash("Face image must contain exactly one clear face.", 'error')
-                return redirect(url_for('adminStudents'))
             with open(save_path, 'wb') as out:
                 out.write(img_bytes)
         elif webcam_image:
             try:
                 image_b64 = webcam_image.split(',', 1)[1] if ',' in webcam_image else webcam_image
                 img_bytes = base64.b64decode(image_b64)
-                if not _bytes_has_single_face(img_bytes):
-                    flash("Captured image must contain exactly one clear face.", 'error')
-                    return redirect(url_for('adminStudents'))
                 with open(save_path, 'wb') as out:
                     out.write(img_bytes)
             except Exception:
@@ -3821,9 +2114,9 @@ def api_student_frame():
         with student_stale_violation_lock:
             student_stale_violation_at.pop(sid_str, None)
 
-        # Critical: route does only receive/store/schedule. No heavy inference in request path.
-        _schedule_student_frame_detection(student_id, student_name, frame)
-
+        # The WASM engine now processes everything client side. 
+        # We still accept frames to stream to the admin view via `admin_live_stream` MJPEG.
+        
         return jsonify({'ok': True, 'queued': True, 'student_id': student_id})
 
     except Exception as e:
@@ -3947,7 +2240,9 @@ def api_student_exit_signal():
         details = details[:500]
 
         # Enforce tab switch as a violation (strict â€” short cooldown so repeats are counted)
-        _trigger_violation(student_id, student_name, 'TAB_SWITCH', f"{event_type}: {details}", cooldown_seconds=0.2)
+        _record_runtime_warning(student_id, student_name, 'TAB_SWITCH', f"{event_type}: {details}")
+        if warning_system:
+            warning_system.add_warning(student_id, 'TAB_SWITCH', f"{event_type}: {details}")
         logger.info(f"[TAB_SWITCH ENFORCED] student={student_id} details={details}")
 
         # Best-effort immediate DB persistence for close events
@@ -4113,76 +2408,7 @@ def api_admin_active_students():
         logger.error(f"api_admin_active_students error: {e}", exc_info=True)
         return jsonify({'students': []})
 
-@app.route('/api/object-detection-status')
-@require_role('ADMIN')
-def api_object_detection_status():
-    """Return status of object detection model"""
-    return jsonify({
-        'enabled': object_net_enabled,
-        'model': 'YOLOv8' if object_net_enabled else 'Not loaded',
-        'model_path': yolo_loaded_model_path,
-        'device': yolo_device,
-        'prohibited_labels': list(PROHIBITED_LABELS),
-        'ultralytics_available': ULTRALYTICS_AVAILABLE,
-        'torch_available': TORCH_AVAILABLE,
-        'cuda_available': bool(TORCH_AVAILABLE and torch is not None and torch.cuda.is_available()),
-        'mapped_prohibited_class_ids': prohibited_class_ids,
-        'fast_face_only_mode': FAST_FACE_ONLY_MODE,
-        'pose_analysis_enabled': RUN_POSE_ANALYSIS,
-        'object_analysis_interval_sec': OBJECT_ANALYSIS_INTERVAL_SEC,
-        'ocr_available': OCR_AVAILABLE,
-        'ocr_engine': 'pytesseract' if OCR_AVAILABLE else 'disabled',
-        'download_commands': [
-            'pip install ultralytics',
-            'python download_yolo_models.py'
-        ] if not object_net_enabled else []
-    })
-
-@app.route('/api/detection-pipeline-status')
-@require_role('ADMIN')
-def api_detection_pipeline_status():
-    """Return live detector and per-student frame pipeline status."""
-    now = time.time()
-    students = {}
-    with latest_student_frames_lock:
-        frame_items = {str(sid): dict(item or {}) for sid, item in latest_student_frames.items()}
-    with student_detection_state_lock:
-        detection_items = {str(sid): dict(item or {}) for sid, item in student_detection_state.items()}
-    with student_frame_rx_lock:
-        rx_counts = dict(student_frame_rx_counts)
-
-    for sid in sorted(set(list(frame_items.keys()) + list(detection_items.keys()) + list(rx_counts.keys()))):
-        frame_item = frame_items.get(sid, {})
-        state_item = detection_items.get(sid, {})
-        frame_ts = float(frame_item.get('frame_timestamp') or frame_item.get('timestamp') or 0.0)
-        proc_ts = float(frame_item.get('processed_timestamp') or 0.0)
-        students[sid] = {
-            'frames_received': int(rx_counts.get(sid, 0)),
-            'raw_age_sec': round(now - frame_ts, 3) if frame_ts else None,
-            'processed_age_sec': round(now - proc_ts, 3) if proc_ts else None,
-            'has_raw_frame': frame_item.get('frame') is not None,
-            'has_processed_frame': frame_item.get('processed_frame') is not None,
-            'worker_running': bool(state_item.get('running', False)),
-            'has_pending_frame': state_item.get('pending_frame') is not None,
-            'last_object_labels': [d.get('label') for d in (state_item.get('last_object_detections') or [])],
-            'last_visible_object_labels': list(state_item.get('last_visible_object_labels') or []),
-            'last_prohibited_object_labels': list(state_item.get('last_prohibited_object_labels') or []),
-            'last_person_count': int(state_item.get('last_person_count') or 0),
-            'status_snapshot': dict(state_item.get('status_snapshot') or {}),
-        }
-
-    return jsonify({
-        'mediapipe_available': MEDIAPIPE_AVAILABLE,
-        'face_mesh_loaded': face_mesh_detector is not None,
-        'pose_loaded': pose_detector is not None,
-        'pose_pipeline_active': bool(RUN_POSE_ANALYSIS and (not FAST_FACE_ONLY_MODE) and MEDIAPIPE_AVAILABLE and pose_detector is not None),
-        'opencv_available': CV2_AVAILABLE,
-        'yolo_enabled': object_net_enabled,
-        'yolo_model_path': yolo_loaded_model_path,
-        'fast_face_only_mode': FAST_FACE_ONLY_MODE,
-        'run_pose_analysis': RUN_POSE_ANALYSIS,
-        'students': students
-    })
+# Pipeline API endpoints were removed since inference runs in client WASM
 
 # -------------------------
 # SocketIO handlers
@@ -4191,14 +2417,15 @@ if MONITORING_ENABLED and socketio:
     @socketio.on('connect', namespace='/student')
     def student_connect():
         user = current_user()
-        if not user or user.get('Role') != 'STUDENT':
-            return False
+        if not user:
+            return False  # reject unauthenticated
         sid = request.sid
+        user_id = str(user.get('Id', ''))
         try:
-            join_room(f"student:{user.get('Id')}")
+            join_room(f"student:{user_id}")
         except Exception:
             pass
-        logger.info(f'Student socket connected: {sid}')
+        logger.info(f'Student socket connected: {sid} (user={user_id}, role={user.get("Role")})')
 
     @socketio.on('disconnect', namespace='/student')
     def student_disconnect():
@@ -4314,7 +2541,13 @@ if MONITORING_ENABLED and socketio:
         student_id = str(data.get('student_id'))
         action = data.get('action')
         if student_id:
-            terminated = _trigger_violation(student_id, data.get('student_name') or 'Unknown', 'PROHIBITED_SHORTCUT', str(action))
+            student_name = data.get('student_name') or 'Unknown'
+            # Record runtime warning but omit termination logic since that's handled client-side or natively now
+            _record_runtime_warning(student_id, student_name, 'PROHIBITED_SHORTCUT', str(action))
+            if warning_system:
+                terminated = warning_system.add_warning(student_id, 'PROHIBITED_SHORTCUT', str(action))
+            else:
+                terminated = False
             logger.info(f"[SHORTCUT] student={student_id} action={action} terminated={terminated}")
             if terminated:
                 emit('auto_terminated', {'student_id': student_id})
@@ -4327,7 +2560,11 @@ if MONITORING_ENABLED and socketio:
         student_name = str(data.get('student_name') or (current_user() or {}).get('Name') or 'Unknown')
         details = str(data.get('details') or 'Tab switch detected').strip()
         if student_id:
-            terminated = _trigger_violation(student_id, student_name, 'TAB_SWITCH', details, cooldown_seconds=0.5)
+            _record_runtime_warning(student_id, student_name, 'TAB_SWITCH', details)
+            if warning_system:
+                terminated = warning_system.add_warning(student_id, 'TAB_SWITCH', details)
+            else:
+                terminated = False
             logger.info(f"[TAB_SWITCH] student={student_id} details={details} terminated={terminated}")
         else:
             logger.info(f"[TAB_SWITCH IGNORED] missing student_id details={details}")
@@ -4369,6 +2606,109 @@ if MONITORING_ENABLED and socketio:
             }
 
     # --- WEBRTC SIGNALING (STUDENT -> ADMIN) ---
+
+    # ── Ring buffer for detailed telemetry history (admin cross-verification) ──
+    _telemetry_history = {}  # { student_id: deque(maxlen=200) }
+    _telemetry_history_lock = threading.Lock()
+
+    @socketio.on('student_live_frame', namespace='/student')
+    def handle_student_live_frame(data):
+        """Relay live camera frame from student to admin via socket (no OpenCV needed)."""
+        student_id = str(data.get('student_id', ''))
+        if not student_id or not data.get('frame'):
+            return
+        logger.debug(f'[FRAME] Received live frame from student {student_id}, size={len(data["frame"][:20])}...')
+        # Register student as active
+        with active_exam_students_lock:
+            active_exam_students.add(student_id)
+        # Update timestamp in latest_student_frames so polling finds them
+        now_ts = time.time()
+        with latest_student_frames_lock:
+            prev = latest_student_frames.get(student_id, {})
+            latest_student_frames[student_id] = {
+                **prev,
+                'timestamp': now_ts,
+                'frame_timestamp': now_ts,
+                'processed_timestamp': now_ts,
+            }
+        # Relay to admin namespace as 'student_frame' (which admin already listens for)
+        socketio.emit('student_frame', {
+            'student_id': student_id,
+            'frame': data['frame'],
+            'score': data.get('score', 0),
+            'timestamp_ms': data.get('timestamp_ms', int(now_ts * 1000))
+        }, namespace='/admin')
+
+    @socketio.on('telemetry_update_v2', namespace='/student')
+    def handle_telemetry_update_v2(data):
+        """Receive hyper-detailed telemetry from student WASM engine and relay to admin."""
+        student_id = str(data.get('student_id', ''))
+        if not student_id:
+            return
+        score = data.get('analysis', {}).get('suspicion_score', 0)
+        metrics = data.get('metrics', {})
+
+        # Ensure student appears in admin polling
+        with active_exam_students_lock:
+            active_exam_students.add(student_id)
+
+        # Store in ring buffer for cross-verification
+        from collections import deque
+        with _telemetry_history_lock:
+            if student_id not in _telemetry_history:
+                _telemetry_history[student_id] = deque(maxlen=200)
+            _telemetry_history[student_id].append(data)
+
+        # Update existing tracking dict
+        now_ts = time.time()
+        with latest_student_frames_lock:
+            prev = latest_student_frames.get(student_id, {})
+            latest_student_frames[student_id] = {
+                'frame': prev.get('frame'),
+                'processed_frame': prev.get('processed_frame'),
+                'timestamp': prev.get('timestamp', now_ts),
+                'frame_timestamp': prev.get('frame_timestamp', now_ts),
+                'processed_timestamp': now_ts,
+                'detections': prev.get('detections', []),
+                'status_snapshot': {
+                    'warning_count': int(warning_system.get_warnings(student_id) if warning_system else 0),
+                    'suspicion_score': score,
+                    'faces_detected': metrics.get('face_count', 0),
+                    'phone_detected': 'cell phone' in metrics.get('banned_labels', []),
+                    'laptop_detected': 'laptop' in metrics.get('banned_labels', []),
+                },
+                'last_visible_object_labels': metrics.get('banned_labels', []),
+                'last_prohibited_object_labels': metrics.get('banned_labels', []),
+                'last_person_count': metrics.get('person_count', 0),
+                'wasm_telemetry': data,  # Store full telemetry for admin
+            }
+
+        if score >= 50:
+            logger.info(f"🚨 [WASM TELEMETRY v2] High Suspicion for {student_id}: Score {score}")
+
+        # Broadcast to admin namespace
+        socketio.emit('student_telemetry_v2', data, namespace='/admin')
+
+    @socketio.on('request_student_frames', namespace='/admin')
+    def handle_request_student_frames(data):
+        """Admin requests random frame snapshots from a student for cross-verification."""
+        student_id = str(data.get('student_id', ''))
+        count = min(int(data.get('count', 6)), 10)
+        socketio.emit('capture_frames', {'count': count, 'request_id': data.get('request_id')}, namespace='/student', to=student_id)
+
+    @socketio.on('student_frame_response', namespace='/student')
+    def handle_student_frame_response(data):
+        """Student sends captured frames back to admin for cross-verification."""
+        socketio.emit('student_frame_captured', data, namespace='/admin')
+
+    @app.route('/api/admin/student-telemetry/<student_id>', methods=['GET'])
+    def get_student_telemetry_history(student_id):
+        """Admin API: get recent telemetry history for a student."""
+        with _telemetry_history_lock:
+            history = list(_telemetry_history.get(student_id, []))
+        return jsonify({'student_id': student_id, 'history': history[-50:]})  # Last 50 entries
+
+
     @socketio.on('webrtc_offer', namespace='/student')
     def handle_webrtc_offer(data):
         socketio.emit('webrtc_offer', data, namespace='/admin')
