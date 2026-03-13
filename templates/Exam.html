@@ -249,6 +249,27 @@
             border: 1px solid rgba(255, 255, 255, 0.2);
             display: flex;
             align-items: center;
+            gap: 15px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+
+        .warning-banner.visible {
+            opacity: 1;
+            transform: translateX(-50%) translateY(20px);
+        }
+
+        .warning-icon {
+            font-size: 1.5rem;
+        }
+
+        .warning-text {
+            color: var(--danger);
+            font-weight: 700;
+        }
+
+        /* Top Progress Bar */    align-items: center;
             gap: 10px;
             min-width: 320px;
             text-align: center;
@@ -772,6 +793,234 @@
                 font-size: 12px;
             }
         }
+        /* ── Admin Observation & Termination Modals ── */
+        .proctor-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(12px);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .proctor-modal-content {
+            background: white;
+            border-radius: 24px;
+            width: 100%;
+            max-width: 550px;
+            padding: 35px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            position: relative;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .proctor-modal-header {
+            font-size: 24px;
+            font-weight: 800;
+            color: var(--primary);
+            margin-bottom: 12px;
+        }
+        .proctor-modal-icon {
+            font-size: 50px;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 25px 0;
+            text-align: left;
+        }
+        .metric-box {
+            background: #f1f5f9;
+            padding: 12px 16px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        .metric-label { font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 700; }
+        .metric-value { font-size: 16px; font-weight: 700; color: #0f172a; }
+        .threat-alert { color: var(--danger) !important; }
+        
+        .btn-proctor {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 12px;
+            font-weight: 700;
+            width: 100%;
+            margin-top: 10px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .btn-proctor:hover { transform: scale(1.02); }
+
+        .termination-summary {
+            background: #fff1f2;
+            border: 1px solid #fecaca;
+            padding: 15px;
+            border-radius: 12px;
+            margin-top: 15px;
+            text-align: left;
+            font-size: 14px;
+        }
+        /* ── Admin Observation & Termination Modals ── */
+        .proctor-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(12px);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .proctor-modal-content {
+            background: white;
+            border-radius: 24px;
+            width: 100%;
+            max-width: 550px;
+            padding: 35px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            position: relative;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .proctor-modal-header {
+            font-size: 24px;
+            font-weight: 800;
+            color: var(--primary);
+            margin-bottom: 12px;
+        }
+        .proctor-modal-icon {
+            font-size: 50px;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 25px 0;
+            text-align: left;
+        }
+        .metric-box {
+            background: #f1f5f9;
+            padding: 12px 16px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        .metric-label { font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 700; }
+        .metric-value { font-size: 16px; font-weight: 700; color: #0f172a; }
+        .threat-alert { color: var(--danger) !important; }
+        
+        .btn-proctor {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 12px;
+            font-weight: 700;
+            width: 100%;
+            margin-top: 10px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .btn-proctor:hover { transform: scale(1.02); }
+
+        .termination-summary {
+            background: #fff1f2;
+            border: 1px solid #fecaca;
+            padding: 15px;
+            border-radius: 12px;
+            margin-top: 15px;
+            text-align: left;
+            font-size: 14px;
+        }
+        .threat-alert { color: var(--danger) !important; }
+        
+        .btn-proctor {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 12px;
+            font-weight: 700;
+            width: 100%;
+            margin-top: 10px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .btn-proctor:hover { transform: scale(1.02); }
+
+        .termination-summary {
+            background: #fff1f2;
+            border: 1px solid #fecaca;
+            padding: 15px;
+            border-radius: 12px;
+            margin-top: 15px;
+            text-align: left;
+            font-size: 14px;
+        }
+
+        /* Modal Overlay */
+        .proctor-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(12px);
+            z-index: 99999;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .proctor-modal-content {
+            background: white;
+            border-radius: 24px;
+            width: 100%;
+            max-width: 550px;
+            padding: 35px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            position: relative;
+        }
+        .proctor-modal-header {
+            font-size: 24px;
+            font-weight: 800;
+            color: var(--primary);
+            margin-bottom: 12px;
+        }
+        .proctor-modal-icon {
+            font-size: 50px;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 25px 0;
+            text-align: left;
+        }
+        .metric-box {
+            background: #f1f5f9;
+            padding: 12px 16px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        .metric-label { font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 700; }
+        .metric-value { font-size: 16px; font-weight: 700; color: #0f172a; }
     </style>
 </head>
 
@@ -1540,6 +1789,11 @@
             const question = selectedQuestions[currentQuestion];
 
             return `
+                <div id="proctor-warning-banner" class="warning-banner border-danger shadow-lg" style="display: none; top: 100px; padding: 15px 30px; background: rgba(255, 235, 235, 0.95); z-index: 1000; border-radius: 8px;">
+                    <i class="fas fa-exclamation-triangle warning-icon text-danger mr-2"></i>
+                    <span id="warning-banner-text" class="warning-text text-danger" style="font-size: 1.1rem;">Warning: Prohibited Behavior Detected</span>
+                </div>
+                
                 <div class="quiz-content">
                     <div class="progress-container">
                         <div class="progress-label">
@@ -1935,6 +2189,8 @@
         const MONITORING_ENABLED = ("{{ monitoring_enabled|default(true)|string|lower }}" === "true");
 
         const warningSystem = {
+            window_warningSystem_global: null, // placeholder
+            init_done: false,
             currentWarnings: 0,
             examTerminated: false,
             socket: null,
@@ -1964,8 +2220,14 @@
                 'DEVTOOLS_OPEN': 3000,
                 'DEVTOOLS_OPENED': 3000,
                 'DEVTOOLS_SHORTCUT': 3000,
-                'KEYBOARD_SHORTCUT': 3000
+                'KEYBOARD_SHORTCUT': 3000,
+                'GAZE_AWAY': 5000,
+                'NOT_FORWARD': 5000,
+                'NO_FACE': 5000
             },
+            gazeAwayFrames: 0,
+            noFaceFrames: 0,
+            badPoseFrames: 0,
 
             init() {
                 console.log('🚨 Warning System Initialized');
@@ -1978,6 +2240,11 @@
                 this.startWarningSync();
                 this.updateWarningBanner();
                 this.updateSecurityStatus();
+                window.warningSystem = this;
+                this.closeObservationModal = () => { 
+                    const m = document.getElementById('admin-observation-modal');
+                    if (m) m.style.display = 'none';
+                };
             },
 
             initSocketIO() {
@@ -1989,7 +2256,34 @@
                     this.socket.on('connect', () => console.log('Connected to exam monitoring'));
                     this.socket.on('student_violation', (data) => this.addWarning(data));
                     this.socket.on('warnings_cleared', () => this.clearWarnings());
-                    this.socket.on('exam_terminated', (data) => this.terminateExam(data.reason));
+                    
+                    // Phase 13: Enhanced Admin Notification
+                    this.socket.on('admin_notification', (data) => {
+                        console.log('🔔 Admin notification received:', data);
+                        window.showObservationModal(data.metrics || {});
+                    });
+
+                    // Phase 13: Enhanced Termination with Summary
+                    this.socket.on('exam_terminated', (data) => {
+                        console.log('❌ Exam force terminated:', data);
+                        window.showTerminationModal(data);
+                    });
+
+                    this.socket.on('voice_alert', (data) => {
+                        const bannerEl = document.getElementById('proctor-warning-banner');
+                        const bannerTextEl = document.getElementById('warning-banner-text');
+                        if (bannerEl && bannerTextEl && data.detected) {
+                            this.lastVoiceAlertAt = Date.now();
+                            bannerTextEl.innerText = "Warning: Human voice detected in room";
+                            bannerEl.classList.add('visible');
+                            bannerEl.style.display = 'flex';
+                        }
+                    });
+
+                    this.socket.on('terminate_exam', (data) => {
+                        console.log('Terminating exam due to proctor decisions');
+                        this.terminateExam(data.reason);
+                    });
 
                     // WebRTC P2P Relays
                     this.socket.on('request_webrtc_stream', () => {
@@ -2055,6 +2349,49 @@
                         console.error('WebRTC offer error:', err);
                     }
                 };
+            },
+
+            // Phase 14: Interaction Helpers
+            showObservationModal(metrics) {
+                const modal = document.getElementById('admin-observation-modal');
+                if (!modal) return;
+                document.getElementById('obs-pose').textContent = `Y:${metrics.yaw || 0}° / P:${metrics.pitch || 0}°`;
+                document.getElementById('obs-gaze').textContent = metrics.gaze || '0.00';
+                document.getElementById('obs-voice').textContent = (metrics.voice_level || 0) + '%';
+                document.getElementById('obs-objects').textContent = (metrics.objects && metrics.objects.length > 0) ? metrics.objects.join(', ') : 'None';
+                
+                // Highlight threats
+                document.getElementById('obs-pose').className = (Math.abs(metrics.yaw) > 28 || Math.abs(metrics.pitch) > 22) ? 'metric-value threat-alert' : 'metric-value';
+                document.getElementById('obs-gaze').className = (metrics.gaze > 0.28) ? 'metric-value threat-alert' : 'metric-value';
+                document.getElementById('obs-voice').className = (metrics.voice_level > 50) ? 'metric-value threat-alert' : 'metric-value';
+                document.getElementById('obs-objects').className = (metrics.objects && metrics.objects.length > 0) ? 'metric-value threat-alert' : 'metric-value';
+
+                modal.style.display = 'flex';
+            },
+
+            showTerminationModal(data) {
+                const modal = document.getElementById('exam-termination-modal');
+                if (!modal) return;
+                const stats = data.metrics_summary || {};
+                
+                document.getElementById('termination-reason').textContent = data.reason || 'Terminated for proctoring violations.';
+                document.getElementById('term-stats').textContent = `Warnings: ${stats.warnings || 0}/3 │ Violated Rules: ${stats.violations || 0} │ Peak Suspicion: ${stats.max_suspicion || 0}`;
+                document.getElementById('term-objects').textContent = (stats.detected_objects && stats.detected_objects.length > 0) 
+                    ? `Prohibited Items: [${stats.detected_objects.join(', ')}]` 
+                    : 'No specific items detected.';
+                
+                // Lock out the user
+                if (this.stop) this.stop();
+                this.examTerminated = true;
+                // Stop internal engines
+                try { window.proctor_engine_active = false; } catch(e){}
+
+                modal.style.display = 'flex';
+                
+                // Disable all inputs
+                document.querySelectorAll('input, button, select, textarea').forEach(el => {
+                    if (el.textContent !== 'Exit System') el.disabled = true;
+                });
             },
 
             startWarningSync() {
@@ -2663,6 +3000,73 @@
                         if (banned.length > 0) proctorLog(`  🚫 Banned: [${banned.join(', ')}]`, 'err');
                     }
 
+                    // ── Warning Banner UI Logic ──
+                    const bannerEl = document.getElementById('proctor-warning-banner');
+                    const bannerTextEl = document.getElementById('warning-banner-text');
+                    if (bannerEl && bannerTextEl) {
+                        const flagsArr = a.active_flags ? Array.from(a.active_flags) : [];
+                        const banned = m.banned_labels ? Array.from(m.banned_labels) : [];
+                        
+                        // ── Gaze Tracking (2s = ~30 frames at 15fps) ──
+                        if (m.gaze_offset > 0.28) {
+                            warningSystem.gazeAwayFrames++;
+                        } else {
+                            warningSystem.gazeAwayFrames = 0;
+                        }
+                        if (warningSystem.gazeAwayFrames > 30) {
+                            if (!flagsArr.includes('GAZE_AWAY')) flagsArr.push('GAZE_AWAY');
+                        }
+
+                        // ── Pose Tracking ──
+                        if (Math.abs(m.yaw_deg) > 28 || Math.abs(m.pitch_deg) > 22) {
+                            warningSystem.badPoseFrames++;
+                        } else {
+                            warningSystem.badPoseFrames = 0;
+                        }
+                        if (warningSystem.badPoseFrames > 15) {
+                            if (!flagsArr.includes('NOT_FORWARD')) flagsArr.push('NOT_FORWARD');
+                        }
+
+                        // ── No Face Tracking ──
+                        if (m.face_count === 0) {
+                            warningSystem.noFaceFrames++;
+                        } else {
+                            warningSystem.noFaceFrames = 0;
+                        }
+                        if (warningSystem.noFaceFrames > 15) {
+                            if (!flagsArr.includes('NO_FACE')) flagsArr.push('NO_FACE');
+                        }
+
+                        let bannerActive = false;
+                        let bannerMsg = "";
+
+                        if (flagsArr.includes('NO_FACE')) {
+                            bannerMsg = "Warning: No face detected!";
+                            bannerActive = true;
+                        } else if (flagsArr.includes('NOT_FORWARD')) {
+                            bannerMsg = "Warning: Please look forward at the screen";
+                            bannerActive = true;
+                        } else if (flagsArr.includes('GAZE_AWAY')) {
+                            bannerMsg = "Warning: Avoid gazing away from the screen";
+                            bannerActive = true;
+                        } else if (banned.length > 0) {
+                            bannerMsg = `Warning: Prohibited object detected (${banned[0]})`;
+                            bannerActive = true;
+                        } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 3000)) {
+                            bannerMsg = "Warning: Human voice detected in room";
+                            bannerActive = true;
+                        }
+
+                        if (bannerActive) {
+                            bannerTextEl.innerText = bannerMsg;
+                            bannerEl.classList.add('visible');
+                            bannerEl.style.display = 'flex';
+                        } else {
+                             // Only hide if not manually shown by voice_alert or other events
+                             bannerEl.classList.remove('visible');
+                        }
+                    }
+
                     // ── Emit full telemetry to admin via socket ──
                     if (typeof warningSystem !== 'undefined' && warningSystem.socket && typeof studentId !== 'undefined') {
                         warningSystem.socket.emit('telemetry_update_v2', {
@@ -2727,10 +3131,10 @@
                     this.canvas = document.createElement('canvas');
 
                     const cameraConstraints = [
-                        { video: { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, max: 20, min: 12 } }, audio: false },
-                        { video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 18, max: 20, min: 10 } }, audio: false },
-                        { video: { width: { ideal: 960 }, height: { ideal: 540 } }, audio: false },
-                        { video: true, audio: false }
+                        { video: { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, max: 20, min: 12 } }, audio: true },
+                        { video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 18, max: 20, min: 10 } }, audio: true },
+                        { video: { width: { ideal: 960 }, height: { ideal: 540 } }, audio: true },
+                        { video: true, audio: true }
                     ];
                     let lastErr = null;
                     for (const constraints of cameraConstraints) {
@@ -2970,6 +3374,7 @@
             calibrationUntil: 0,
             voicedFrames: 0,
             missFrames: 0,
+            // Removed local VAD loop for Phase 15
 
             warnMicOff(details) {
                 const now = Date.now();
@@ -3034,7 +3439,7 @@
                         }
                     }
                     this.started = true;
-                    this.loop();
+                    // Removed local detection loop; only streaming to server now.
                 } catch (e) {
                     console.log('Voice monitor unavailable:', e);
                 }
@@ -3245,7 +3650,47 @@
                     return false;
                 }
                 try {
+                    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                    this.context = new AudioCtx();
+                    this.audioTrack = audioTrack;
+                    
                     const tracks = [videoTrack.clone ? videoTrack.clone() : videoTrack];
+                    // 4) Add raw PCM streaming to server for tampering-proof voice detection
+                    if (this.context && this.audioTrack && this.audioTrack.readyState === 'live') {
+                        const source = this.context.createMediaStreamSource(new MediaStream([this.audioTrack]));
+                        // Use a 4096 buffer size (approx ~92ms of audio for fast server-side processing)
+                        const processor = this.context.createScriptProcessor(4096, 1, 1);
+                        
+                        processor.onaudioprocess = (e) => {
+                            if (!window.warningSystem || !window.warningSystem.socket || !window.warningSystem.socket.connected) return;
+                            
+                            const channelData = e.inputBuffer.getChannelData(0); // Float32Array
+                            
+                            // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767) for smaller payload size
+                            const int16Array = new Int16Array(channelData.length);
+                            for (let i = 0; i < channelData.length; i++) {
+                                int16Array[i] = Math.max(-32768, Math.min(32767, Math.floor(channelData[i] * 32768)));
+                            }
+                            
+                            // Ensure context is running (browser autoplay policies)
+                            if (this.context && this.context.state === 'suspended') {
+                                this.context.resume().catch(e => console.log("Audio resume fail:", e));
+                            }
+                            
+                            // Emit raw binary chunk to server
+                            if (window.warningSystem && warningSystem.socket && warningSystem.socket.connected) {
+                                if (Math.random() < 0.01) console.log("Streaming audio chunk to server...", int16Array.length);
+                                warningSystem.socket.emit('student_audio_chunk', int16Array.buffer);
+                            }
+                        };
+
+                        source.connect(processor);
+                        processor.connect(this.context.destination); // Required for script processor to fire
+                        
+                        this.pcmProcessor = processor; // Store reference
+                        this.pcmSource = source;
+                    }
+
                     if (audioTrack && audioTrack.readyState === 'live') {
                         tracks.push(audioTrack.clone ? audioTrack.clone() : audioTrack);
                     } else {
@@ -3495,6 +3940,65 @@
   }
   function _safeN(v,d){ return v!=null&&typeof v==='number'?v.toFixed(d):'-'; }
 </script>
+    <!-- Observation Modal -->
+    <div id="admin-observation-modal" class="proctor-modal">
+        <div class="proctor-modal-content">
+            <div class="proctor-modal-icon"><i class="fas fa-user-shield"></i></div>
+            <div class="proctor-modal-header">Proctor Observation</div>
+            <p style="color:#475569; font-weight: 500;">You are being closely observed by the proctoring team. Maintain focus on your screen.</p>
+            
+            <div class="metric-grid" id="observation-metrics">
+                <div class="metric-box">
+                    <div class="metric-label">Head Angle</div>
+                    <div class="metric-value" id="obs-pose">-- / --</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Eye Gaze</div>
+                    <div class="metric-value" id="obs-gaze">--</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Voice Signal</div>
+                    <div class="metric-value" id="obs-voice">Quiet</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Objects</div>
+                    <div class="metric-value" style="font-size:12px;" id="obs-objects">None</div>
+                </div>
+            </div>
+            
+            <button class="btn-proctor" onclick="if(window.warningSystem) window.warningSystem.closeObservationModal()">I Understand</button>
+        </div>
+    </div>
+
+    <!-- Termination Modal -->
+    <div id="exam-termination-modal" class="proctor-modal">
+        <div class="proctor-modal-content" style="max-width: 600px;">
+            <div class="proctor-modal-icon" style="background: var(--danger); -webkit-text-fill-color: white; width: 80px; height: 80px; display:flex; align-items:center; justify-content:center; border-radius:50%; margin: 0 auto 25px;">
+                <i class="fas fa-times-circle"></i>
+            </div>
+            <div class="proctor-modal-header" style="color:var(--danger)">Exam Terminated</div>
+            <p style="color:#475569; font-weight: 600;" id="termination-reason">Your session has been terminated due to multiple proctoring violations.</p>
+            
+            <div class="termination-summary">
+                <h6 style="font-weight: 800; color: #9f1239; margin-bottom: 10px;">PROCTORING INTEGRITY REPORT</h6>
+                <p id="term-stats">--</p>
+                <div id="term-objects" style="font-weight: 700;">--</div>
+                <hr style="border-color: #fecaca;">
+                <p style="font-size: 12px; color: #b91c1c; margin: 0;">This report has been logged and sent to your institution. Re-entry is prohibited.</p>
+            </div>
+            
+            <button class="btn-proctor" style="background: #0f172a; margin-top: 25px;" onclick="window.location.href='/'">Exit System</button>
+        </div>
+    </div>
+
+    <script>
+        // Global aliases for the above modals if the script fails to attach to window.warningSystem correctly
+        window.showObservationModal = (metrics) => { if(window.warningSystem) window.warningSystem.showObservationModal(metrics); };
+        window.showTerminationModal = (data) => { if(window.warningSystem) window.warningSystem.showTerminationModal(data); };
+        if(window.warningSystem) {
+             window.warningSystem.closeObservationModal = () => { document.getElementById('admin-observation-modal').style.display='none'; };
+        }
+    </script>
 </body>
 
 </html>

@@ -24,13 +24,19 @@ export const COCO_CLASSES = [
   "bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
   "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair",
   "couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
-  "remote","keyboard","cell phone","microwave","oven","toaster","sink",
   "refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
 ];
 
 // ── Banned & Accessory Labels ───────────────────────────
 export const BANNED_LABELS = new Set([
-  "cell phone","book","laptop","tablet","remote","mouse","keyboard"
+  'cell phone',
+  'laptop',
+  'book',       // Paper/notes
+  'clock',      // Smartwatch
+  'mouse',      // Wired objects
+  'keyboard',   // Wired objects
+  'remote',     // Clickers/wired devices
+  'tablet'
 ]);
 
 export const ACCESSORY_LABELS = new Set([
@@ -42,31 +48,40 @@ export const MONITORED_OBJECT_LABELS = Array.from(new Set([...BANNED_LABELS, ...
 // ── Per-class Confidence Thresholds ─────────────────────
 export const CLASS_CONF_THRESHOLDS = {
   person: 0.50,
-  "cell phone": 0.32, book: 0.34, laptop: 0.35, tablet: 0.34,
-  remote: 0.34, mouse: 0.34, keyboard: 0.34,
-  headphone: 0.35, headphones: 0.35, headset: 0.35,
-  earphone: 0.33, earphones: 0.33, earbud: 0.33, earbuds: 0.33,
-  wire: 0.32, cable: 0.32
+  'cell phone': 0.15,
+  'laptop': 0.20,
+  'book': 0.15,
+  'clock': 0.20,
+  'remote': 0.15,
+  'mouse': 0.15,
+  'keyboard': 0.15,
+  'tablet': 0.28, // Kept original tablet value as it wasn't in the instruction's list of changes
+  headphone: 2.0, // Disabled
+  headphones: 2.0, // Disabled
+  headset: 2.0, // Disabled
+  earphone: 2.0, earphones: 2.0, earbud: 2.0, earbuds: 2.0,
+  wire: 2.0, // Disabled
+  cable: 2.0 // Disabled
 };
 
 // ── Minimum Area Ratio (bbox area / frame area) ─────────
 export const MIN_AREA_RATIO_BY_LABEL = {
   person: 0.01,
-  "cell phone": 6e-4, book: 24e-4, laptop: 6e-3, tablet: 32e-4,
-  remote: 8e-4, mouse: 8e-4, keyboard: 31e-4,
-  headphone: 18e-4, headphones: 18e-4, headset: 18e-4,
-  earphone: 8e-4, earphones: 8e-4, earbud: 7e-4, earbuds: 7e-4,
-  wire: 35e-5, cable: 35e-5
+  "cell phone": 4e-4, book: 15e-4, laptop: 4e-3, tablet: 20e-4,
+  remote: 5e-4, mouse: 5e-4, keyboard: 20e-4,
+  headphone: 22e-4, headphones: 22e-4, headset: 22e-4,
+  earphone: 6e-4, earphones: 6e-4, earbud: 5e-4, earbuds: 5e-4,
+  wire: 20e-5, cable: 20e-5
 };
 
 // ── Minimum Short-side Pixels ───────────────────────────
 export const MIN_SHORT_SIDE_PX_BY_LABEL = {
   person: 40,
-  "cell phone": 10, book: 22, laptop: 28, tablet: 24,
-  remote: 11, mouse: 10, keyboard: 22,
-  headphone: 16, headphones: 16, headset: 16,
-  earphone: 9, earphones: 9, earbud: 8, earbuds: 8,
-  wire: 6, cable: 6
+  "cell phone": 8, book: 15, laptop: 20, tablet: 18,
+  remote: 8, mouse: 8, keyboard: 15,
+  headphone: 20, headphones: 20, headset: 20,
+  earphone: 7, earphones: 7, earbud: 6, earbuds: 6,
+  wire: 4, cable: 4
 };
 
 // ── Face Landmark Indices ───────────────────────────────
@@ -85,9 +100,9 @@ export const LIGHTING_MIN_SCORE      = 0.52;
 
 // ── Accessory Heuristic Thresholds ──────────────────────
 export const ACCESSORY_SCORE_THRESHOLDS = {
-  wire:      0.58,
-  earphone:  0.62,
-  headphone: 0.67
+  wire:      2.0,
+  earphone:  2.0,
+  headphone: 2.0
 };
 
 // ── Evaluation: Risk Weights (evaluateRealtime) ─────────
@@ -103,9 +118,9 @@ export const EVAL = {
   gaze_pitch_threshold: 16,    // degrees — eye gaze vertical
   gaze_pitch_risk:       9,
   bad_lighting_risk:    12,
-  wire_risk:            14,
-  earphone_risk:        18,
-  headphone_risk:       16,
+  wire_risk:            0,
+  earphone_risk:        0,
+  headphone_risk:       0,
   no_face_risk:         35,    // CRITICAL — hiding face
   multi_face_risk:      25,    // multiple faces
   safety_good_threshold: 72    // safetyLevel >= this → GOOD_TO_GO

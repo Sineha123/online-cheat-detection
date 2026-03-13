@@ -119,65 +119,63 @@ const ACCESSORY_EMA_ALPHA = 0.35;
 const LIGHTING_EMA_ALPHA = 0.28;
 const CLASS_CONF_THRESHOLDS = {
   person: 0.5,
-  "cell phone": 0.32,
-  book: 0.34,
-  laptop: 0.35,
-  tablet: 0.34,
-  remote: 0.34,
-  mouse: 0.34,
-  keyboard: 0.34,
-  headphone: 0.35,
-  headphones: 0.35,
-  headset: 0.35,
-  earphone: 0.33,
-  earphones: 0.33,
-  earbud: 0.33,
-  earbuds: 0.33,
-  wire: 0.32,
-  cable: 0.32
+  "cell phone": 0.15,
+  "laptop": 0.2,
+  "book": 0.15,
+  "clock": 0.2,
+  "remote": 0.15,
+  "mouse": 0.15,
+  "keyboard": 0.15,
+  headset: 0.45,
+  earphone: 0.3,
+  earphones: 0.3,
+  earbud: 0.3,
+  earbuds: 0.3,
+  wire: 0.12,
+  cable: 0.12
 };
 const MIN_AREA_RATIO_BY_LABEL = {
   person: 0.01,
-  "cell phone": 6e-4,
-  book: 24e-4,
-  laptop: 6e-3,
-  tablet: 32e-4,
-  remote: 8e-4,
-  mouse: 8e-4,
-  keyboard: 31e-4,
-  headphone: 18e-4,
-  headphones: 18e-4,
-  headset: 18e-4,
-  earphone: 8e-4,
-  earphones: 8e-4,
-  earbud: 7e-4,
-  earbuds: 7e-4,
-  wire: 35e-5,
-  cable: 35e-5
+  "cell phone": 1e-3,
+  "laptop": 5e-3,
+  "book": 1e-3,
+  "clock": 5e-3,
+  "remote": 1e-3,
+  "mouse": 1e-3,
+  "keyboard": 1e-3,
+  headphone: 22e-4,
+  headphones: 22e-4,
+  headset: 22e-4,
+  earphone: 6e-4,
+  earphones: 6e-4,
+  earbud: 5e-4,
+  earbuds: 5e-4,
+  wire: 2e-4,
+  cable: 2e-4
 };
 const MIN_SHORT_SIDE_PX_BY_LABEL = {
   person: 40,
-  "cell phone": 10,
-  book: 22,
-  laptop: 28,
-  tablet: 24,
-  remote: 11,
-  mouse: 10,
-  keyboard: 22,
-  headphone: 16,
-  headphones: 16,
-  headset: 16,
-  earphone: 9,
-  earphones: 9,
-  earbud: 8,
-  earbuds: 8,
-  wire: 6,
-  cable: 6
+  "cell phone": 8,
+  book: 15,
+  laptop: 20,
+  tablet: 18,
+  remote: 8,
+  mouse: 8,
+  keyboard: 15,
+  headphone: 20,
+  headphones: 20,
+  headset: 20,
+  earphone: 7,
+  earphones: 7,
+  earbud: 6,
+  earbuds: 6,
+  wire: 4,
+  cable: 4
 };
 const ACCESSORY_SCORE_THRESHOLDS = {
-  wire: 0.58,
-  earphone: 0.62,
-  headphone: 0.67
+  wire: 0.12,
+  earphone: 0.35,
+  headphone: 0.78
 };
 let wasmReady = false;
 let ProctorEngineCtor = null;
@@ -717,7 +715,7 @@ class ProctorCore {
       1
     );
     const headphoneScoreHeuristic = this.clamp(
-      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 1.55 + headBand.dark_ratio * 0.95 + (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.22,
+      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 1.05 + headBand.dark_ratio * 0.65 + (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.45,
       0,
       1
     );

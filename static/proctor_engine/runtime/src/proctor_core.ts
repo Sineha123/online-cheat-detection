@@ -172,68 +172,66 @@ const LIGHTING_EMA_ALPHA = 0.28;
 
 const CLASS_CONF_THRESHOLDS: Record<string, number> = {
   person: 0.5,
-  "cell phone": 0.32,
-  book: 0.34,
-  laptop: 0.35,
-  tablet: 0.34,
-  remote: 0.34,
-  mouse: 0.34,
-  keyboard: 0.34,
-  headphone: 0.35,
-  headphones: 0.35,
-  headset: 0.35,
-  earphone: 0.33,
-  earphones: 0.33,
-  earbud: 0.33,
-  earbuds: 0.33,
-  wire: 0.32,
-  cable: 0.32
+  'cell phone': 0.15,
+  'laptop': 0.20,
+  'book': 0.15,
+  'clock': 0.20,
+  'remote': 0.15,
+  'mouse': 0.15,
+  'keyboard': 0.15,
+  headset: 0.45,
+  earphone: 0.30,
+  earphones: 0.30,
+  earbud: 0.30,
+  earbuds: 0.30,
+  wire: 0.12,
+  cable: 0.12
 };
 
 const MIN_AREA_RATIO_BY_LABEL: Record<string, number> = {
   person: 0.01,
-  "cell phone": 0.0006,
-  book: 0.0024,
-  laptop: 0.006,
-  tablet: 0.0032,
-  remote: 0.0008,
-  mouse: 0.0008,
-  keyboard: 0.0031,
-  headphone: 0.0018,
-  headphones: 0.0018,
-  headset: 0.0018,
-  earphone: 0.0008,
-  earphones: 0.0008,
-  earbud: 0.0007,
-  earbuds: 0.0007,
-  wire: 0.00035,
-  cable: 0.00035
+  'cell phone': 0.001,
+  'laptop': 0.005,
+  'book': 0.001,
+  'clock': 0.005,
+  'remote': 0.001,
+  'mouse': 0.001,
+  'keyboard': 0.001,
+  headphone: 0.0022,
+  headphones: 0.0022,
+  headset: 0.0022,
+  earphone: 0.0006,
+  earphones: 0.0006,
+  earbud: 0.0005,
+  earbuds: 0.0005,
+  wire: 0.0002,
+  cable: 0.0002
 };
 
 const MIN_SHORT_SIDE_PX_BY_LABEL: Record<string, number> = {
   person: 40,
-  "cell phone": 10,
-  book: 22,
-  laptop: 28,
-  tablet: 24,
-  remote: 11,
-  mouse: 10,
-  keyboard: 22,
-  headphone: 16,
-  headphones: 16,
-  headset: 16,
-  earphone: 9,
-  earphones: 9,
-  earbud: 8,
-  earbuds: 8,
-  wire: 6,
-  cable: 6
+  "cell phone": 8,
+  book: 15,
+  laptop: 20,
+  tablet: 18,
+  remote: 8,
+  mouse: 8,
+  keyboard: 15,
+  headphone: 20,
+  headphones: 20,
+  headset: 20,
+  earphone: 7,
+  earphones: 7,
+  earbud: 6,
+  earbuds: 6,
+  wire: 4,
+  cable: 4
 };
 
 const ACCESSORY_SCORE_THRESHOLDS = {
-  wire: 0.58,
-  earphone: 0.62,
-  headphone: 0.67
+  wire: 0.12,
+  earphone: 0.35,
+  headphone: 0.78
 } as const;
 
 let wasmReady = false;
@@ -895,9 +893,9 @@ export class ProctorCore {
     );
 
     const headphoneScoreHeuristic = this.clamp(
-      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 1.55 +
-        headBand.dark_ratio * 0.95 +
-        (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.22,
+      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 1.05 +
+        headBand.dark_ratio * 0.65 +
+        (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.45,
       0,
       1
     );

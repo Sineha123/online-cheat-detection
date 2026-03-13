@@ -485,6 +485,19 @@
         .admin-log-panel { background:#0f0d23; max-height:220px; overflow-y:auto; border-radius:8px; padding:8px 10px; margin-top:12px; scrollbar-width:thin; scrollbar-color:#4338ca #0f0d23; }
         .admin-log-panel .al { font-size:10.5px; font-family:'SF Mono',Consolas,monospace; line-height:1.4; padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04); color:#a5b4fc; white-space:pre-wrap; word-break:break-word; }
         .admin-log-panel .al.info { color:#7dd3fc; } .al.warn { color:#fbbf24; } .al.err { color:#f87171; } .al.tele { color:#c084fc; }
+
+        /* ── Advanced Threat Dashboard Styles ── */
+        .threat-matrix { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+        .matrix-item { background: #f8fafc; border: 1px solid #e2e8f0; padding: 6px 10px; border-radius: 6px; }
+        .matrix-label { font-size: 10px; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 2px; }
+        .matrix-value { font-size: 13px; font-weight: 600; color: #1e293b; }
+
+        .voice-section { margin-top: 12px; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+        .voice-meter-bg { height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; margin-top: 4px; }
+        .voice-meter-fill { height: 100%; width: 0%; background: #6366f1; transition: width 0.2s ease, background 0.2s ease; }
+        .threat-high { color: #ef4444 !important; }
+        .pulse-voice { animation: pulse-red 1.5s infinite; }
+        @keyframes pulse-red { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
     </style>
 </head>
 
@@ -703,6 +716,7 @@
             studentsData[sid].active_flags = Array.isArray(data.analysis?.active_flags) ? data.analysis.active_flags : [];
             studentsData[sid].face_count = data.metrics?.face_count ?? null;
             studentsData[sid].person_count = data.metrics?.person_count ?? null;
+            studentsData[sid].metrics = data.metrics || {};
 
             if (created) {
                 updateDashboard(true);
@@ -987,6 +1001,73 @@
         });
 
         // Handle feed errors
+        socket.on('relay_student_audio', function (data) {
+            const sid = String(data.student_id);
+            const buffer = data.audio; // Int16 AraryBuffer
+            
+            if (!this.studentVoiceStreaks) this.studentVoiceStreaks = {};
+            if (!this.voiceDetectionSettings) {
+                this.voiceDetectionSettings = {
+                    rmsThreshold: 180, // Sensitivity for relayed Int16 audio
+                    minDetectionStreak: 4, // Require 4 chunks ~400ms
+                    cooldownFrames: 30 // Prevents spam
+                };
+            }
+
+            // Calculate RMS
+            const int16 = new Int16Array(buffer);
+            let sum = 0;
+            for (let i = 0; i < int16.length; i++) sum += int16[i] * int16[i];
+            const rms = Math.sqrt(sum / int16.length);
+
+            // Streak logic
+            let streak = this.studentVoiceStreaks[sid] || 0;
+            if (rms > this.voiceDetectionSettings.rmsThreshold) {
+                streak++;
+            } else {
+                streak = Math.max(0, streak - 1);
+            }
+            this.studentVoiceStreaks[sid] = streak;
+
+            if (streak >= this.voiceDetectionSettings.minDetectionStreak) {
+                // Trigger Warning back to student via server
+                socket.emit('admin_trigger_voice_warning', {
+                    student_id: sid,
+                    rms: Math.round(rms)
+                });
+                // Visual feedback on admin card
+                const voiceText = document.getElementById(`voice-text-${sid}`);
+                const voiceMeter = document.getElementById(`voice-meter-${sid}`);
+                const card = document.getElementById(`student-${sid}`);
+                
+                if (voiceText) {
+                    voiceText.textContent = "SPEECH DETECTED";
+                    voiceText.style.color = "#ff4757";
+                    voiceText.style.fontWeight = "bold";
+                    setTimeout(() => {
+                        voiceText.textContent = "Quiet";
+                        voiceText.style.color = "";
+                        voiceText.style.fontWeight = "";
+                    }, 3000);
+                }
+                if (voiceMeter) {
+                    voiceMeter.style.width = "100%";
+                    voiceMeter.style.background = "#ff4757";
+                    setTimeout(() => {
+                        voiceMeter.style.width = "0%";
+                        voiceMeter.style.background = "";
+                    }, 3000);
+                }
+                if (card) {
+                    card.classList.add('threat-pulse');
+                    setTimeout(() => card.classList.remove('threat-pulse'), 2000);
+                }
+                showAlert(`🎙️ Voice detected for ${sid}`, 'warning');
+                // Reset to cooldown
+                this.studentVoiceStreaks[sid] = -this.voiceDetectionSettings.cooldownFrames;
+            }
+        });
+
         socket.on('feed_error', function (data) {
             console.log('❌ Feed error:', data);
             document.getElementById('modal-loading').innerHTML =
@@ -1152,6 +1233,29 @@
                         <span class="info-label">Verdict/Integrity:</span>
                         <span class="info-value" id="integrity-${student.student_id}">${verdict} / ${integrity}</span>
                     </div>
+
+                    <!-- Enhanced Threat Matrix -->
+                    <div class="threat-matrix">
+                        <div class="matrix-item">
+                            <div class="matrix-label">Head Pose</div>
+                            <div class="matrix-value" id="pose-${student.student_id}">-- / --</div>
+                        </div>
+                        <div class="matrix-item">
+                            <div class="matrix-label">Gaze Eye</div>
+                            <div class="matrix-value" id="gaze-${student.student_id}">--</div>
+                        </div>
+                    </div>
+
+                    <!-- Voice Monitoring Section -->
+                    <div class="voice-section">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                             <div class="matrix-label">Voice Threat Level</div>
+                             <div class="matrix-value" style="font-size:11px;" id="voice-text-${student.student_id}">Quiet</div>
+                        </div>
+                        <div class="voice-meter-bg">
+                            <div id="voice-meter-${student.student_id}" class="voice-meter-fill"></div>
+                        </div>
+                    </div>
                 </div>
                 ${student.violations && student.violations.length > 0 ? `
                     <div class="violations-list">
@@ -1171,6 +1275,9 @@
                     </button>
                     <button class="btn" style="background:#6366f1;color:#fff;" onclick="verifyTamper('${student.student_id}', '${student.student_name}')">
                         🛡️ Verify
+                    </button>
+                    <button class="btn" style="background:#f59e0b;color:#fff;" onclick="notifyStudent('${student.student_id}', '${student.student_name}')">
+                        🔔 Notify
                     </button>
                     <button class="btn btn-terminate" onclick="terminateExam(${student.student_id}, '${student.student_name}')">
                         ❌ Terminate
@@ -1217,18 +1324,67 @@
                 }
             }
 
-            // Show detected objects
+            // Show detected objects & Behavioral Flags
             const objectsEl = document.getElementById(`objects-${sid}`);
             if (objectsEl) {
                 const banned = student.banned_labels || [];
                 const flags = student.active_flags || [];
                 const parts = [];
+                // Prioritize banned objects in the secondary colored area
                 if (banned.length > 0) parts.push(`🚫 ${banned.join(', ')}`);
-                if (flags.length > 0) parts.push(`🚩 ${flags.join(', ')}`);
                 if (student.face_count > 1) parts.push(`👥 ${student.face_count} faces`);
                 if (student.face_count === 0) parts.push('⚠️ No face');
+                
                 objectsEl.innerHTML = parts.length > 0 ? parts.join(' │ ') : '';
-                objectsEl.style.color = parts.length > 0 ? '#f87171' : '#6ee7b7';
+                objectsEl.style.color = parts.length > 0 ? '#ef4444' : '#10b981';
+            }
+
+            // Update Head Pose & Gaze metrics persistently
+            const poseEl = document.getElementById(`pose-${sid}`);
+            if (poseEl) {
+                const metrics = student.metrics || {};
+                const yaw = Math.round(metrics.yaw_deg || 0);
+                const pitch = Math.round(metrics.pitch_deg || 0);
+                poseEl.textContent = `Y:${yaw}° / P:${pitch}°`;
+                if (Math.abs(yaw) > 28 || Math.abs(pitch) > 22) {
+                    poseEl.classList.add('threat-high');
+                } else {
+                    poseEl.classList.remove('threat-high');
+                }
+            }
+
+            const gazeEl = document.getElementById(`gaze-${sid}`);
+            if (gazeEl) {
+                const metrics = student.metrics || {};
+                const offset = (metrics.gaze_offset || 0).toFixed(2);
+                gazeEl.textContent = offset;
+                if (metrics.gaze_offset > 0.28) {
+                    gazeEl.classList.add('threat-high');
+                } else {
+                    gazeEl.classList.remove('threat-high');
+                }
+            }
+
+            // Update Voice Threat Section
+            const meterFill = document.getElementById(`voice-meter-${sid}`);
+            const voiceText = document.getElementById(`voice-text-${sid}`);
+            if (meterFill && voiceText) {
+                const m = student.metrics || {};
+                const level = m.voice_threat_level || 0;
+                const rms = m.voice_rms || 0;
+                
+                meterFill.style.width = level + '%';
+                if (level > 40) {
+                    meterFill.style.background = level > 70 ? '#ef4444' : '#f59e0b';
+                    voiceText.textContent = level > 70 ? 'CRITICAL SPEAKING' : 'Voice Detected';
+                    voiceText.classList.add('threat-high');
+                    card.classList.add('pulse-voice');
+                } else {
+                    meterFill.style.background = '#6366f1';
+                    voiceText.textContent = rms > 10 ? 'Atmosphere Noise' : 'Quiet';
+                    voiceText.classList.remove('threat-high');
+                    card.classList.remove('pulse-voice');
+                }
             }
         }
 
@@ -1506,16 +1662,50 @@
             currentStreamingStudent = null;
         }
 
+        function notifyStudent(studentId, studentName) {
+            const sid = String(studentId);
+            const student = studentsData[sid];
+            if (!student) return;
+
+            if (confirm(`Send an observation warning to ${studentName}? This will show them their current proctoring stats.`)) {
+                const metricsSnapshot = {
+                    yaw: Math.round(student.metrics?.yaw_deg || 0),
+                    pitch: Math.round(student.metrics?.pitch_deg || 0),
+                    gaze: (student.metrics?.gaze_offset || 0).toFixed(2),
+                    voice_level: student.metrics?.voice_threat_level || 0,
+                    objects: student.banned_labels || []
+                };
+
+                socket.emit('admin_notify_student', {
+                    student_id: sid,
+                    metrics: metricsSnapshot
+                });
+                showAlert(`Notification sent to ${studentName}`, 'success');
+            }
+        }
+
         function terminateExam(studentId, studentName) {
-            if (confirm(`Are you sure you want to terminate ${studentName}'s exam?\n\nThis action cannot be undone.`)) {
-                const reason = prompt('Reason for termination:', 'Manual termination by administrator');
-                if (reason !== null) {
-                    socket.emit('terminate_exam', {
-                        student_id: studentId,
-                        reason: reason || 'Manual termination by admin'
-                    });
-                    showAlert(`📢 Termination request sent for ${studentName}`, 'warning');
-                }
+            const sid = String(studentId);
+            const student = studentsData[sid];
+            
+            if (confirm(`Are you sure you want to TERMINATE the exam for ${studentName}? This action cannot be undone.`)) {
+                const metricsSnapshot = student ? {
+                    warnings: student.warnings || 0,
+                    violations: student.violations?.length || 0,
+                    max_suspicion: student.suspicion_score || 0,
+                    detected_objects: student.banned_labels || []
+                } : {};
+
+                socket.emit('force_terminate_exam', {
+                    student_id: sid,
+                    reason: 'Terminated by Admin for proctoring violations.',
+                    metrics_summary: metricsSnapshot
+                });
+
+                // Legacy fallback for internal state
+                socket.emit('terminate_student_exam', { student_id: sid });
+                
+                showAlert(`Termination signal sent to ${studentName}`, 'warning');
             }
         }
 
