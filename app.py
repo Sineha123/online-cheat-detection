@@ -134,6 +134,25 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)
 def make_session_permanent():
     session.permanent = True
 
+
+# Serve a tiny fallback favicon to avoid browser 404 requests for /favicon.ico
+# Returns a 1x1 transparent PNG in-memory so no static file is required.
+from flask import make_response
+import base64
+
+_ONE_PIXEL_PNG_B64 = (
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII='
+)
+
+
+@app.route('/favicon.ico')
+def favicon():
+    png = base64.b64decode(_ONE_PIXEL_PNG_B64)
+    resp = make_response(png)
+    resp.headers.set('Content-Type', 'image/png')
+    resp.headers.set('Content-Length', len(png))
+    return resp
+
 # MySQL config
 # Use 127.0.0.1 default to force TCP and avoid local socket/pipe resolution issues.
 app.config['MYSQL_HOST'] = os.getenv('MYSQL_HOST', '127.0.0.1')
@@ -363,6 +382,30 @@ def _overlay_status_snapshot(frame, snapshot, overlay_item):
     cv2.putText(frame, f"Suspicion Score: {score}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if score > 50 else (0, 255, 0), 2)
     
     return frame
+
+
+def _bytes_has_single_face(img_bytes):
+    """Return True if the provided image bytes contain exactly one face.
+    Uses OpenCV Haar cascade when available; if OpenCV or cascade isn't
+    available the function falls back to permissive behavior (returns True)
+    to avoid blocking registrations on missing optional dependencies.
+    """
+    try:
+        if not CV2_AVAILABLE or cv2 is None or np is None:
+            return True
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return True
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cascade_path = os.path.join('Haarcascades', 'haarcascade_frontalface_default.xml')
+        if not os.path.exists(cascade_path):
+            return True
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+        return isinstance(faces, (list, tuple, np.ndarray)) and len(faces) == 1
+    except Exception:
+        return True
 
 @app.before_request
 def csrf_protect():
@@ -795,8 +838,12 @@ def register():
                         (fullname, email, generate_password_hash(password), profile_filename, 'STUDENT')
                 )
             except Exception as col_error:
+                error_str = str(col_error)
+                logger.warning(f"Initial register attempt failed: {error_str}")
+                
                 # If Profile column doesn't exist, insert without it
-                if "Unknown column 'Profile'" in str(col_error):
+                if "Unknown column 'Profile'" in error_str or "field list" in error_str.lower():
+                    logger.info("Retrying registration without Profile column...")
                     cursor.execute(
                         "INSERT INTO students (Name, Email, Password, Role) VALUES (%s, %s, %s, %s)",
                         (fullname, email, generate_password_hash(password), 'STUDENT')
@@ -807,13 +854,17 @@ def register():
             mysql.connection.commit()
             cursor.close()
             
+            logger.info(f"Registration successful for email: {email}")
             flash('Registration successful! Please sign in now.', 'register_success')
             return redirect(url_for('main'))
             
         except Exception as e:
-            mysql.connection.rollback()
-            logger.error(f"Registration error: {e}")
-            flash('Error during registration. Please try again.', 'register_error')
+            if mysql.connection:
+                mysql.connection.rollback()
+            if cursor:
+                cursor.close()
+            logger.error(f"Registration error for {email}: {e}", exc_info=True)
+            flash(f'Error during registration: {str(e)}', 'register_error')
             return redirect(url_for('main', register='true'))
     
     return redirect(url_for('main'))
@@ -865,21 +916,21 @@ def admin_logout():
 def rules():
     return render_template('ExamRules.html')
 
-@app.route('/faceInput')
-@require_role('STUDENT')
-def faceInput():
-    # Release any server-held webcam so browser capture can open camera reliably.
-    try:
-        # camera_streamer.release() # This line was commented out in the original code, keeping it that way.
-        pass
-    except Exception:
-        pass
-    user = current_user()
-    # legacy python monitor disabled
-    with active_exam_students_lock:
-        if user:
-            active_exam_students.discard(int(user['Id']))
-    return render_template('ExamFaceInput.html')
+# @app.route('/faceInput')
+# @require_role('STUDENT')
+# def faceInput():
+#     # Release any server-held webcam so browser capture can open camera reliably.
+#     try:
+#         # camera_streamer.release() # This line was commented out in the original code, keeping it that way.
+#         pass
+#     except Exception:
+#         pass
+#     user = current_user()
+#     # legacy python monitor disabled
+#     with active_exam_students_lock:
+#         if user:
+#             active_exam_students.discard(int(user['Id']))
+#     return render_template('ExamFaceInput.html')
 
 @app.route('/video_capture')
 def video_capture():
@@ -955,10 +1006,11 @@ def saveFaceInput():
         # Error hone par wapis face input page par bhej dein
         return redirect(url_for('faceInput'))
 
-@app.route('/confirmFaceInput')
-def confirmFaceInput():
-    profile = profileName
-    return render_template('ExamConfirmFaceInput.html', profile=profile)
+# @app.route('/confirmFaceInput')
+# def confirmFaceInput():
+#     profile = profileName
+#     # return render_template('ExamConfirmFaceInput.html', profile=profile)
+#     return redirect(url_for('systemCheck'))
 
 @app.route('/systemCheck')
 @require_role('STUDENT')
@@ -1218,8 +1270,14 @@ def examAction():
         'gaze_right': 'GAZE_RIGHT', 'GAZE_RIGHT': 'GAZE_RIGHT',
         'gaze_up': 'GAZE_UP', 'GAZE_UP': 'GAZE_UP',
         'gaze_down': 'GAZE_DOWN', 'GAZE_DOWN': 'GAZE_DOWN',
+        'gaze_up_left': 'GAZE_UP_LEFT', 'GAZE_UP_LEFT': 'GAZE_UP_LEFT',
+        'gaze_up_right': 'GAZE_UP_RIGHT', 'GAZE_UP_RIGHT': 'GAZE_UP_RIGHT',
+        'gaze_down_left': 'GAZE_DOWN_LEFT', 'GAZE_DOWN_LEFT': 'GAZE_DOWN_LEFT',
+        'gaze_down_right': 'GAZE_DOWN_RIGHT', 'GAZE_DOWN_RIGHT': 'GAZE_DOWN_RIGHT',
         'voice_detected': 'VOICE_DETECTED', 'VOICE_DETECTED': 'VOICE_DETECTED',
         'DISTRACTION': 'DISTRACTION', 'distraction': 'DISTRACTION',
+        'NOT_FORWARD': 'DISTRACTION', 'not_forward': 'DISTRACTION',
+        'GAZE_AWAY': 'DISTRACTION', 'gaze_away': 'DISTRACTION',
         'STUDENT_LEFT_SEAT': 'STUDENT_LEFT_SEAT', 'student_left_seat': 'STUDENT_LEFT_SEAT',
         'mic_off': 'VOICE_DETECTED', 'MIC_OFF': 'VOICE_DETECTED',
         'head_movement': 'HEAD_MOVEMENT', 'HEAD_MOVEMENT': 'HEAD_MOVEMENT',
@@ -1361,16 +1419,45 @@ def showResult():
                 elif percentage >= 50: grade = 'D'
                 else:                  grade = 'F'
                 
+                # Fetch violations for the latest session to build a breakdown for the report
+                violations = []
+                violations_breakdown = {}
+                try:
+                    vcur = mysql.connection.cursor()
+                    vcur.execute("""
+                        SELECT ViolationType, Details, Timestamp
+                        FROM violations
+                        WHERE SessionID = %s
+                        ORDER BY Timestamp ASC
+                    """, (row[5],))
+                    vrows = vcur.fetchall()
+                    vcur.close()
+                    if vrows:
+                        for vrow in vrows:
+                            vtype = str(vrow[0] or 'UNKNOWN')
+                            violations.append({
+                                'type': vtype,
+                                'details': str(vrow[1] or ''),
+                                'time': str(vrow[2] or '')
+                            })
+                            violations_breakdown[vtype] = violations_breakdown.get(vtype, 0) + 1
+                except Exception as v_err:
+                    logger.warning(f"Violations fetch warning: {v_err}")
+
                 result_data = {
-                    'percentage':     percentage,
-                    'score':          (row[2] or 0) * 2,  # CorrectAnswers * 2
-                    'total_questions': row[1] or 125,
-                    'grade':          grade,
-                    'time_spent':     time_spent,
-                    'warnings_issued': int(row[7]) if row[7] else 0,
-                    'auto_terminated': (db_status == 'TERMINATED'),
-                    'submission_time': row[3],
-                    'exam_title':     'Final Examination'
+                    'percentage':        percentage,
+                    'score':             (row[2] or 0) * 2,  # CorrectAnswers * 2
+                    'correct_answers':   int(row[2] or 0),
+                    'total_questions':   row[1] or 125,
+                    'grade':             grade,
+                    'time_spent':        time_spent,
+                    'warnings_issued':   int(row[7]) if row[7] else 0,
+                    'auto_terminated':   (db_status == 'TERMINATED'),
+                    'submission_time':   row[3],
+                    'exam_title':        'Final Examination',
+                    'violations':        violations,
+                    'violations_breakdown': violations_breakdown,
+                    'total_violations':  len(violations)
                 }
         except Exception as e:
             logger.error(f"Error fetching student result: {e}", exc_info=True)
@@ -2404,6 +2491,10 @@ if MONITORING_ENABLED and socketio:
         violation    = data.get('violation', {})
         vtype        = violation.get('type', 'TAB_SWITCH')
         details      = violation.get('details', str(vtype))
+        if str(vtype).upper() == 'TAB_SWITCH':
+            dlow = str(details).lower()
+            if 'lost focus' in dlow or 'window' in dlow or 'hidden' in dlow:
+                details = 'Tab switching detected'
         runtime_count, runtime_violation = _record_runtime_warning(student_id, student_name, vtype, details)
         
         logger.info(f"⚠️  warning_issued received: student={student_id} type={vtype}")
@@ -2440,8 +2531,14 @@ if MONITORING_ENABLED and socketio:
             'GAZE_RIGHT': 'GAZE_RIGHT', 'gaze_right': 'GAZE_RIGHT',
             'GAZE_UP': 'GAZE_UP', 'gaze_up': 'GAZE_UP',
             'GAZE_DOWN': 'GAZE_DOWN', 'gaze_down': 'GAZE_DOWN',
+            'GAZE_UP_LEFT': 'GAZE_UP_LEFT', 'gaze_up_left': 'GAZE_UP_LEFT',
+            'GAZE_UP_RIGHT': 'GAZE_UP_RIGHT', 'gaze_up_right': 'GAZE_UP_RIGHT',
+            'GAZE_DOWN_LEFT': 'GAZE_DOWN_LEFT', 'gaze_down_left': 'GAZE_DOWN_LEFT',
+            'GAZE_DOWN_RIGHT': 'GAZE_DOWN_RIGHT', 'gaze_down_right': 'GAZE_DOWN_RIGHT',
             'VOICE_DETECTED': 'VOICE_DETECTED', 'voice_detected': 'VOICE_DETECTED',
             'DISTRACTION': 'DISTRACTION', 'distraction': 'DISTRACTION',
+            'NOT_FORWARD': 'DISTRACTION', 'not_forward': 'DISTRACTION',
+            'GAZE_AWAY': 'DISTRACTION', 'gaze_away': 'DISTRACTION',
             'STUDENT_LEFT_SEAT': 'STUDENT_LEFT_SEAT', 'student_left_seat': 'STUDENT_LEFT_SEAT',
             'MIC_OFF': 'VOICE_DETECTED', 'mic_off': 'VOICE_DETECTED',
             'HEAD_MOVEMENT': 'HEAD_MOVEMENT', 'head_movement': 'HEAD_MOVEMENT',
@@ -2514,6 +2611,9 @@ if MONITORING_ENABLED and socketio:
         student_id = str(data.get('student_id'))
         student_name = str(data.get('student_name') or (current_user() or {}).get('Name') or 'Unknown')
         details = str(data.get('details') or 'Tab switch detected').strip()
+        dlow = details.lower()
+        if 'lost focus' in dlow or 'window' in dlow or 'hidden' in dlow:
+            details = 'Tab switching detected'
         if student_id:
             _record_runtime_warning(student_id, student_name, 'TAB_SWITCH', details)
             if warning_system:
@@ -2643,6 +2743,23 @@ if MONITORING_ENABLED and socketio:
             return
         score = data.get('analysis', {}).get('suspicion_score', 0)
         metrics = data.get('metrics', {})
+        # Normalize labels for admin display (smartwatch/headphones)
+        raw_labels = list(metrics.get('banned_labels') or [])
+        accessory = metrics.get('accessory') or {}
+        has_headphones = bool(accessory.get('earphone_detected') or accessory.get('headphone_detected'))
+        if has_headphones and 'headphones' not in raw_labels:
+            raw_labels.append('headphones')
+        normalized = []
+        for label in raw_labels:
+            if label == 'clock':
+                normalized.append('smartwatch')
+            else:
+                normalized.append(label)
+        # If only a phone label is present but headphones are detected, prefer headphones
+        if has_headphones and normalized == ['cell phone']:
+            normalized = ['headphones']
+        metrics['banned_labels'] = normalized
+        data['metrics'] = metrics
 
         # Ensure student appears in admin polling
         with active_exam_students_lock:

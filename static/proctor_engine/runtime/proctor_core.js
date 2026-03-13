@@ -88,11 +88,14 @@ const COCO_CLASSES = [
 const BANNED_LABELS = /* @__PURE__ */ new Set([
   "cell phone",
   "book",
+  "clock",
+  "smartwatch",
   "laptop",
   "tablet",
   "remote",
   "mouse",
-  "keyboard"
+  "keyboard",
+  "smartwatch",
 ]);
 const ACCESSORY_LABELS = /* @__PURE__ */ new Set([
   "headphone",
@@ -103,7 +106,8 @@ const ACCESSORY_LABELS = /* @__PURE__ */ new Set([
   "earbud",
   "earbuds",
   "wire",
-  "cable"
+  "cable",
+  "smartwatch",
 ]);
 const MONITORED_OBJECT_LABELS = Array.from(/* @__PURE__ */ new Set([...BANNED_LABELS, ...ACCESSORY_LABELS]));
 const LEFT_EYE = [33, 160, 158, 133, 153, 144];
@@ -122,7 +126,7 @@ const CLASS_CONF_THRESHOLDS = {
   "cell phone": 0.15,
   "laptop": 0.2,
   "book": 0.15,
-  "clock": 0.2,
+  "smartwatch": 0.15,
   "remote": 0.15,
   "mouse": 0.15,
   "keyboard": 0.15,
@@ -175,7 +179,7 @@ const MIN_SHORT_SIDE_PX_BY_LABEL = {
 const ACCESSORY_SCORE_THRESHOLDS = {
   wire: 0.12,
   earphone: 0.35,
-  headphone: 0.78
+  headphone: 0.65
 };
 let wasmReady = false;
 let ProctorEngineCtor = null;

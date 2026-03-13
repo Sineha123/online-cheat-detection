@@ -221,6 +221,35 @@
             margin-bottom: 30px;
         }
 
+        .violation-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            width: 100%;
+        }
+
+        .violation-item {
+            background: #fff8f1;
+            border: 1px solid #ffe4c7;
+            border-radius: 12px;
+            padding: 14px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 14px;
+            font-weight: 600;
+            color: #9a3412;
+        }
+
+        .violation-count {
+            background: #fb923c;
+            color: #ffffff;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
         .performance-title {
             font-size: 20px;
             font-weight: 600;
@@ -348,6 +377,10 @@
                 width: 100%;
                 justify-content: center;
             }
+
+            .violation-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -456,6 +489,18 @@
                     </div>
 
                     <div class="detail-card">
+                        <i class="fas fa-check-circle detail-icon"></i>
+                        <div class="detail-label">Correct Answers</div>
+                        <div class="detail-value">
+                            {% if result %}
+                                {{ result.correct_answers }}
+                            {% else %}
+                                0
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="detail-card">
                         <i class="fas fa-clock detail-icon"></i>
                         <div class="detail-label">Time Spent</div>
                         <div class="detail-value">
@@ -480,7 +525,29 @@
                         </div>
                     </div>
                 </div>
-                
+
+                <div class="performance-section">
+                    <h3 class="performance-title">Violation Report</h3>
+                    <div style="margin-bottom: 12px; font-weight: 700; color: #9a3412;">
+                        Total Violations: {{ result.total_violations if result else 0 }}
+                    </div>
+                    <div class="violation-grid">
+                        {% if result and result.violations_breakdown %}
+                            {% for vtype, count in result.violations_breakdown.items() %}
+                                <div class="violation-item">
+                                    <span>{{ vtype }}</span>
+                                    <span class="violation-count">{{ count }}</span>
+                                </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="violation-item">
+                                <span>No violations recorded</span>
+                                <span class="violation-count">0</span>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+
                 <div class="performance-section">
                     <h3 class="performance-title">Performance Overview</h3>
                     <div class="performance-bar">

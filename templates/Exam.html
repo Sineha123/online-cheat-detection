@@ -269,7 +269,7 @@
             font-weight: 700;
         }
 
-        /* Top Progress Bar */    align-items: center;
+        .proctor-status-indicator {
             gap: 10px;
             min-width: 320px;
             text-align: center;
@@ -441,38 +441,6 @@
         .understand-btn:hover {
             transform: translateY(-2px);
             box-shadow: 0 15px 35px rgba(102, 126, 234, 0.4);
-        }
-
-        /* Termination Screen */
-        .termination-screen {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-            z-index: 10001;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-
-        .termination-content {
-            background: white;
-            padding: 40px;
-            border-radius: 20px;
-            text-align: center;
-            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.3);
-            max-width: 450px;
-            width: 100%;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-
-        .termination-icon {
-            font-size: 80px;
-            margin-bottom: 15px;
-            color: var(--danger);
         }
 
         /* Footer */
@@ -1101,46 +1069,6 @@
         </div>
     </div>
 
-    <!-- TERMINATION SCREEN -->
-    <div class="termination-screen" id="termination-screen">
-        <div class="termination-content">
-            <div class="termination-icon">❌</div>
-            <h1 style="color: var(--danger); margin-bottom: 15px; font-weight: 700; font-size: 24px;">
-                <i class="fas fa-ban me-2"></i> EXAM TERMINATED
-            </h1>
-            <p style="font-size: 16px; margin-bottom: 15px; color: var(--gray);" id="termination-reason">
-                Maximum warnings (3/3) reached. Exam integrity compromised.
-            </p>
-            <div style="background: var(--light); padding: 15px; border-radius: 10px; margin: 15px 0;">
-                <h4 style="color: var(--dark); margin-bottom: 12px; font-size: 16px;">
-                    <i class="fas fa-file-alt me-2"></i>Termination Details
-                </h4>
-                <p style="margin: 5px 0; color: var(--gray); font-size: 14px;">
-                    <i class="fas fa-user me-2"></i>Student: <strong>{{ student_name|default('Student') }}</strong>
-                </p>
-                <p style="margin: 5px 0; color: var(--gray); font-size: 14px;">
-                    <i class="fas fa-id-card me-2"></i>ID: <strong>{{ student_id|default('N/A') }}</strong>
-                </p>
-                <p style="margin: 5px 0; color: var(--gray); font-size: 14px;">
-                    <i class="fas fa-clock me-2"></i>Time of Termination: <strong id="termination-time">--:--</strong>
-                </p>
-                <p style="margin: 5px 0; color: var(--gray); font-size: 14px;">
-                    <i class="fas fa-exclamation-triangle me-2"></i>Warnings Received: <strong>3/3</strong>
-                </p>
-            </div>
-            <div
-                style="background: linear-gradient(135deg, var(--danger), #dc2626); padding: 12px; border-radius: 10px; margin: 15px 0;">
-                <p style="margin: 0; font-size: 20px; color: white; font-weight: 800;">
-                    Final Grade: F
-                </p>
-            </div>
-            <p style="margin-top: 15px; color: var(--gray); font-size: 13px;">
-                <i class="fas fa-info-circle me-2"></i>
-                Your exam has been automatically submitted and reported to the administrator.
-            </p>
-        </div>
-    </div>
-
     <!-- LOGOUT CONFIRMATION MODAL -->
     <div class="modal fade" id="logoutModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -1255,9 +1183,13 @@
                         </div>
 
                         <div id="faceVerifyStatus" style="display:none; margin-bottom:12px; font-weight:600;"></div>
+                        <div id="voiceTestStatus" style="display:none; margin-bottom:12px; font-weight:600;"></div>
 
                         <button type="button" id="verifyFaceBtn" class="start-btn" style="margin-right: 10px;">
                             <i class="fas fa-user-check me-2"></i>Verify Face
+                        </button>
+                        <button type="button" id="testVoiceBtn" class="start-btn" style="margin-right: 10px;">
+                            <i class="fas fa-microphone me-2"></i>Test Voice
                         </button>
                         <button type="submit" id="startQuiz" class="start-btn">
                             <i class="fas fa-play-circle me-2"></i>Start Exam
@@ -1484,7 +1416,7 @@
         const studentId = "{{ student_id|default(0) }}";
         const studentName = "{{ student_name|default('Student') }}";
         const CSRF_TOKEN = "{{ csrf_token() }}";
-        const WASM_PROCTOR_ENABLED = {{ 'true' if wasm_proctor_enabled else 'false' }};
+        const WASM_PROCTOR_ENABLED = ("{{ 'true' if wasm_proctor_enabled else 'false' }}" === "true");
         const hasProfile = ("{{ student_profile|default(false)|string|lower }}" === "true");
 
         // ============================================
@@ -1537,6 +1469,20 @@
             el.textContent = message;
         }
 
+        function showVoiceTestStatus(message, level = 'info') {
+            const el = document.getElementById('voiceTestStatus');
+            if (!el) return;
+            const colors = {
+                success: '#10b981',
+                error: '#ef4444',
+                info: '#111827',
+                warn: '#f59e0b'
+            };
+            el.style.display = 'block';
+            el.style.color = colors[level] || colors.info;
+            el.textContent = message;
+        }
+
         function setStartExamEnabled(enabled) {
             const btn = document.getElementById('startQuiz');
             if (!btn) return;
@@ -1570,6 +1516,36 @@
                 showFaceVerifyStatus('Face verification failed. Please align your face and retry.', 'error');
             } finally {
                 faceVerifyInProgress = false;
+            }
+        });
+        document.getElementById('testVoiceBtn').addEventListener('click', async () => {
+            try {
+                showVoiceTestStatus('Starting voice test... say "hello" now.', 'info');
+                if (!voiceMonitor.started) {
+                    await voiceMonitor.start();
+                }
+                voiceMonitor.voiceTestActive = true;
+                voiceMonitor.voiceTestDetected = false;
+                const startAt = Date.now();
+                const durationMs = 6000;
+                const tick = () => {
+                    const remaining = Math.max(0, Math.ceil((durationMs - (Date.now() - startAt)) / 1000));
+                    if (voiceMonitor.voiceTestDetected) {
+                        showVoiceTestStatus('Voice detected. Test passed.', 'success');
+                        voiceMonitor.voiceTestActive = false;
+                        return;
+                    }
+                    if (remaining <= 0) {
+                        voiceMonitor.voiceTestActive = false;
+                        showVoiceTestStatus('No voice detected. Please check mic permission and try again.', 'error');
+                        return;
+                    }
+                    showVoiceTestStatus(`Listening... ${remaining}s`, 'warn');
+                    setTimeout(tick, 1000);
+                };
+                tick();
+            } catch (err) {
+                showVoiceTestStatus('Voice test failed to start. Please allow microphone access.', 'error');
             }
         });
         document.getElementById('startQuiz').addEventListener('click', startExam);
@@ -1695,10 +1671,15 @@
                 showFaceVerifyStatus('Verifying proctor engine integrity...', 'info');
                 const verifiedRes = await remoteFrameUploader.verifyIntegrity();
                 if (!verifiedRes || !verifiedRes.verified) {
-                    showFaceVerifyStatus(`Integrity check failed.`, 'error');
+                    const failedAssets = (verifiedRes && verifiedRes.failed_assets && verifiedRes.failed_assets.length > 0)
+                        ? verifiedRes.failed_assets.join(', ')
+                        : 'Unspecified assets';
+                    showFaceVerifyStatus(`Integrity check failed: ${failedAssets}. Please contact support.`, 'error');
+                    console.error('Integrity failure assets:', verifiedRes ? verifiedRes.failed_assets : 'none');
                     return false;
                 }
-                showFaceVerifyStatus(`Integrity OK`, 'success');
+                const version = verifiedRes.version || 'v1';
+                showFaceVerifyStatus(`Integrity OK (${version})`, 'success');
                 return true;
             } catch (err) {
                 const msg = (err && err.message) ? err.message : 'Integrity check failed';
@@ -2093,6 +2074,7 @@
         // TIMER FUNCTIONS
         // ============================================
         function startTimer() {
+            updateTimerDisplay();
             timerInterval = setInterval(function () {
                 if (timeLeft <= 0) {
                     clearInterval(timerInterval);
@@ -2200,37 +2182,50 @@
             warningTypeLastAt: {},
             recentViolationKeys: {},
             warningModalOpen: false,
+            terminationScheduled: false,
             acknowledgeGraceUntil: 0,
+            startTime: 0,
+            gazeAwayFrames: 0,
+            badPoseFrames: 0,
+            noFaceFrames: 0,
+            gazeDirection: null,
+            gazeDirectionFrames: 0,
             syncTimer: null,
             lastServerViolationSignature: '',
-            globalWarningGapMs: 3000,        // 3-second global gap
-            postAcknowledgeGraceMs: 3000,    // 3s pause after "I understand"
+            globalWarningGapMs: 3500,        // 3.5-second global gap
+            postAcknowledgeGraceMs: 3500,    // 3.5s pause after "I understand"
             duplicateKeyWindowMs: 4000,
             typeCooldownsMs: {
-                'VOICE_DETECTED': 3000,
-                'MIC_OFF': 3000,
-                'CAMERA_OFF': 3000,
-                'CAMERA_BLOCKED': 3000,
-                'TAB_SWITCH': 3000,
-                'FULLSCREEN_EXIT': 3000,
-                'RIGHT_CLICK': 3000,
-                'COPY': 3000,
-                'PASTE': 3000,
-                'CUT': 3000,
-                'DEVTOOLS_OPEN': 3000,
-                'DEVTOOLS_OPENED': 3000,
-                'DEVTOOLS_SHORTCUT': 3000,
-                'KEYBOARD_SHORTCUT': 3000,
-                'GAZE_AWAY': 5000,
-                'NOT_FORWARD': 5000,
-                'NO_FACE': 5000
+                'VOICE_DETECTED': 4000,
+                'MIC_OFF': 4000,
+                'CAMERA_OFF': 4000,
+                'CAMERA_BLOCKED': 4000,
+                'TAB_SWITCH': 4000,
+                'FULLSCREEN_EXIT': 4000,
+                'RIGHT_CLICK': 4000,
+                'COPY': 4000,
+                'PASTE': 4000,
+                'CUT': 4000,
+                'DEVTOOLS_OPEN': 4000,
+                'DEVTOOLS_OPENED': 4000,
+                'DEVTOOLS_SHORTCUT': 4000,
+                'KEYBOARD_SHORTCUT': 4000,
+                'GAZE_AWAY': 4000,
+                'NOT_FORWARD': 4000,
+                'NO_FACE': 4000,
+                'GAZE_LEFT': 4000,
+                'GAZE_RIGHT': 4000,
+                'GAZE_UP': 4000,
+                'GAZE_DOWN': 4000,
+                'GAZE_UP_LEFT': 4000,
+                'GAZE_UP_RIGHT': 4000,
+                'GAZE_DOWN_LEFT': 4000,
+                'GAZE_DOWN_RIGHT': 4000
             },
-            gazeAwayFrames: 0,
-            noFaceFrames: 0,
-            badPoseFrames: 0,
 
             init() {
                 console.log('🚨 Warning System Initialized');
+                this.startTime = Date.now();
                 if (MONITORING_ENABLED && typeof io !== 'undefined') {
                     this.initSocketIO();
                 }
@@ -2370,28 +2365,8 @@
             },
 
             showTerminationModal(data) {
-                const modal = document.getElementById('exam-termination-modal');
-                if (!modal) return;
-                const stats = data.metrics_summary || {};
-                
-                document.getElementById('termination-reason').textContent = data.reason || 'Terminated for proctoring violations.';
-                document.getElementById('term-stats').textContent = `Warnings: ${stats.warnings || 0}/3 │ Violated Rules: ${stats.violations || 0} │ Peak Suspicion: ${stats.max_suspicion || 0}`;
-                document.getElementById('term-objects').textContent = (stats.detected_objects && stats.detected_objects.length > 0) 
-                    ? `Prohibited Items: [${stats.detected_objects.join(', ')}]` 
-                    : 'No specific items detected.';
-                
-                // Lock out the user
-                if (this.stop) this.stop();
-                this.examTerminated = true;
-                // Stop internal engines
-                try { window.proctor_engine_active = false; } catch(e){}
-
-                modal.style.display = 'flex';
-                
-                // Disable all inputs
-                document.querySelectorAll('input, button, select, textarea').forEach(el => {
-                    if (el.textContent !== 'Exit System') el.disabled = true;
-                });
+                const reason = data?.reason || 'Terminated for proctoring violations.';
+                this.scheduleTermination(reason);
             },
 
             startWarningSync() {
@@ -2463,12 +2438,30 @@
             addWarning(violationData = {}) {
                 if (this.examTerminated || !examStarted) return;
                 if (this.warningModalOpen) {
-                    this.pendingViolations.push(violationData);
-                    return;
+                    const incomingCount = Number(violationData.total_warnings || 0);
+                    if (incomingCount >= MAX_WARNINGS) {
+                        // Force-show the final warning immediately.
+                        this.pendingViolations = [];
+                        this.warningModalOpen = false;
+                        const overlay = document.getElementById('warning-overlay');
+                        if (overlay) overlay.style.display = 'none';
+                    } else {
+                        this.pendingViolations.push(violationData);
+                        return;
+                    }
                 }
                 const now = Date.now();
                 const warningType = String(violationData.type || 'UNKNOWN').toUpperCase();
-                const warningDetails = String(violationData.details || '').trim();
+                let warningDetails = String(violationData.details || '').trim();
+                if (warningType === 'TAB_SWITCH') {
+                    const lowered = warningDetails.toLowerCase();
+                    if (lowered.includes('lost focus') || lowered.includes('window')) {
+                        warningDetails = 'Tab switching detected';
+                    }
+                    if (lowered.includes('hidden')) {
+                        warningDetails = 'Tab switching detected';
+                    }
+                }
                 const violationKey = `${warningType}|${warningDetails}`;
                 const hasServerCount = typeof violationData.total_warnings === 'number';
 
@@ -2522,6 +2515,10 @@
                 this.updateWarningBanner();
                 this.updateLiveWarningCount();
                 this.updateSecurityStatus();
+
+                if (this.currentWarnings >= MAX_WARNINGS && !this.terminationScheduled) {
+                    this.scheduleTermination(`Maximum warnings (${MAX_WARNINGS}/${MAX_WARNINGS}) reached`);
+                }
 
                 if (this.socket && studentId && violationData.source !== 'server') {
                     this.socket.emit('warning_issued', {
@@ -2581,13 +2578,38 @@
                 if (this.pendingViolations.length > 0) {
                     const next = this.pendingViolations.shift();
                     setTimeout(() => this.addWarning(next), this.postAcknowledgeGraceMs);
-                } else if (this.currentWarnings >= MAX_WARNINGS) {
-                    // Show third warning, then terminate after gap
-                    setTimeout(() => {
-                        const reason = `Exam terminated — ${MAX_WARNINGS} warnings reached`;
-                        this.terminateExam(reason);
-                    }, this.postAcknowledgeGraceMs);
                 }
+            },
+
+            showTerminationCountdownModal(reason, delayMs = 3000) {
+                const overlay = document.getElementById('warning-overlay');
+                const content = document.getElementById('warning-content');
+                if (!overlay || !content) return;
+                const seconds = Math.max(1, Math.ceil(delayMs / 1000));
+                const msg = `${reason}. You will be redirected in ${seconds} seconds.`;
+                content.className = 'warning-content level-3';
+                document.getElementById('warning-icon').textContent = '⛔';
+                document.getElementById('warning-title').textContent = 'Exam Termination';
+                document.getElementById('warning-count').textContent = 'TERMINATED';
+                document.getElementById('warning-message').textContent = msg;
+                document.getElementById('warning-details').innerHTML = `<i class="fas fa-exclamation-triangle me-2"></i><strong>Termination:</strong> ${reason}`;
+                const remaining = document.getElementById('remaining-warnings');
+                if (remaining) remaining.style.display = 'none';
+                const btn = document.querySelector('#warning-overlay .understand-btn');
+                if (btn) btn.style.display = 'none';
+                overlay.style.display = 'flex';
+            },
+
+            scheduleTermination(reason) {
+                if (this.terminationScheduled || this.examTerminated) return;
+                this.terminationScheduled = true;
+                // Show termination popup 2s after the final warning, then redirect after 3s.
+                setTimeout(() => {
+                    this.showTerminationCountdownModal(reason, 3000);
+                    setTimeout(() => {
+                        this.terminateExam(reason, { redirectAfter: true, submitDelayMs: 0, redirectDelayMs: 0 });
+                    }, 3000);
+                }, 2000);
             },
 
             updateWarningBanner() {
@@ -2635,27 +2657,105 @@
                 }
             },
 
-            terminateExam(reason) {
+            classifyGazeDirection(yawDeg, pitchDeg) {
+                const yaw = Number.isFinite(yawDeg) ? yawDeg : 0;
+                const pitch = Number.isFinite(pitchDeg) ? pitchDeg : 0;
+
+                // Assumed thresholds (center, hard left/right, diagonals)
+                const CENTER_YAW = 16;
+                const CENTER_PITCH = 16;
+                const HARD_YAW = 42;
+
+                if (Math.abs(yaw) <= CENTER_YAW && Math.abs(pitch) <= CENTER_PITCH) {
+                    return { code: 'CENTER', flag: null, label: 'Center' };
+                }
+
+                if (yaw <= -HARD_YAW) return { code: 'HARD_LEFT', flag: 'GAZE_LEFT', label: 'Hard left' };
+                if (yaw >= HARD_YAW) return { code: 'HARD_RIGHT', flag: 'GAZE_RIGHT', label: 'Hard right' };
+
+                return { code: 'CENTER', flag: null, label: 'Center' };
+            },
+
+            gazeBannerForFlag(flag) {
+                const map = {
+                    'GAZE_LEFT': 'Distraction: Eyes too far left',
+                    'GAZE_RIGHT': 'Distraction: Eyes too far right'
+                };
+                return map[flag] || 'Distraction: Eyes looking away from screen';
+            },
+
+            terminateExam(reason, opts = {}) {
                 if (this.examTerminated) return;
 
                 this.examTerminated = true;
                 examStarted = false;
-                voiceMonitor.stop();
-                sessionRecorder.stop();
-                studentProctorEngine.stop();
+                if (typeof voiceMonitor !== 'undefined') voiceMonitor.stop();
+                if (typeof sessionRecorder !== 'undefined') sessionRecorder.stop();
+                if (window.remoteFrameUploader && remoteFrameUploader.proctorEngine) {
+                    remoteFrameUploader.proctorEngine.stop();
+                }
                 console.log('🚫 Exam terminated:', reason);
 
-                const screen = document.getElementById('termination-screen');
-                document.getElementById('termination-reason').textContent = reason;
-                document.getElementById('termination-time').textContent = new Date().toLocaleTimeString();
-                screen.style.display = 'flex';
+                const totalScore = selectedQuestions.length * MARKS_PER_QUESTION;
+                const percentage = Math.round((score / totalScore) * 100) || 0;
 
                 this.disableExam();
 
-                // Auto-submit after a short delay, but stay on page
-                setTimeout(() => {
-                    this.autoSubmitExam('F');
-                }, 5000);
+                const redirectAfter = Boolean(opts.redirectAfter);
+                const submitDelayMs = Number.isFinite(opts.submitDelayMs) ? Number(opts.submitDelayMs) : (redirectAfter ? 0 : 3000);
+                const redirectDelayMs = Number.isFinite(opts.redirectDelayMs) ? Number(opts.redirectDelayMs) : 0;
+                const redirectUrl = opts.redirectUrl || `/showResultFail?student_id=${encodeURIComponent(studentId)}&student_name=${encodeURIComponent(studentName)}&score=${encodeURIComponent(score)}&percentage=${encodeURIComponent(percentage)}&reason=${encodeURIComponent(reason)}&grade=${encodeURIComponent(percentage >= 50 ? 'P' : 'F')}`;
+
+                if (redirectAfter) {
+                    setTimeout(() => {
+                        fetch('/exam', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-Token': CSRF_TOKEN
+                            },
+                            body: JSON.stringify({
+                                auto_terminated: true,
+                                student_id: studentId,
+                                student_name: studentName,
+                                final_grade: percentage >= 50 ? 'P' : 'F',
+                                score: score,
+                                total: totalScore,
+                                percentage: percentage,
+                                warnings: this.currentWarnings,
+                                question_count: selectedQuestions.length,
+                                termination_reason: reason
+                            })
+                        }).finally(() => {
+                            setTimeout(() => {
+                                window.location.href = redirectUrl;
+                            }, redirectDelayMs);
+                        });
+                    }, submitDelayMs);
+                } else {
+                    // Auto-submit after a short delay, but stay on page
+                    setTimeout(() => {
+                        fetch('/exam', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-Token': CSRF_TOKEN
+                            },
+                            body: JSON.stringify({
+                                auto_terminated: true,
+                                student_id: studentId,
+                                student_name: studentName,
+                                final_grade: percentage >= 50 ? 'P' : 'F',
+                                score: score,
+                                total: totalScore,
+                                percentage: percentage,
+                                warnings: this.currentWarnings,
+                                question_count: selectedQuestions.length,
+                                termination_reason: reason
+                            })
+                        }).catch(err => console.error('Auto-submit failed:', err));
+                    }, submitDelayMs);
+                }
 
                 if (this.socket && studentId) {
                     this.socket.emit('exam_auto_terminated', {
@@ -2745,12 +2845,14 @@
             startTabSwitchDetection() {
                 let tabSwitchCount = 0;
                 let lastTabSwitchAt = 0;
+                let lastSignalAt = 0;
                 const raiseTabSwitch = (reason) => {
                     if (this.examTerminated || !examStarted) return;
                     const now = Date.now();
                     // very short debounce so rapid focus/blur toggles still count
-                    if ((now - lastTabSwitchAt) < 150) return;
+                    if ((now - lastTabSwitchAt) < 100) return;
                     lastTabSwitchAt = now;
+                    lastSignalAt = now;
                     tabSwitchCount++;
                     if (this.socket && studentId) {
                         this.socket.emit('tab_switch_detected', {
@@ -2759,47 +2861,59 @@
                             count: tabSwitchCount
                         });
                     }
+                    // Trigger local warning popup
+                    this.addWarning({
+                        type: 'TAB_SWITCH',
+                        details: reason,
+                        severity: 'medium',
+                        student_id: studentId
+                    });
                 };
 
-                // Tab switch detection (debounced to reduce false positives)
+                // Tab switch detection: require hidden state to persist before warning
+                let hiddenTimer = null;
+                let blurTimer = null;
                 document.addEventListener('visibilitychange', () => {
+                    if (this.examTerminated || !examStarted) return;
                     if (document.hidden) {
-                        raiseTabSwitch('Switched away from exam tab');
-                        try {
-                            const form = new FormData();
-                            form.append('event_type', 'TAB_SWITCH');
-                            form.append('details', 'Document became hidden during exam');
-                            form.append('csrf_token', CSRF_TOKEN);
-                            if (navigator.sendBeacon) {
-                                navigator.sendBeacon('/api/student-exit-signal', form);
-                            }
-                        } catch (_) { }
+                        if (hiddenTimer) clearTimeout(hiddenTimer);
+                        hiddenTimer = setTimeout(() => {
+                            raiseTabSwitch('Tab switching detected');
+                            try {
+                                const form = new FormData();
+                                form.append('event_type', 'TAB_SWITCH');
+                                form.append('details', 'Tab switching detected');
+                                form.append('csrf_token', CSRF_TOKEN);
+                                if (navigator.sendBeacon) {
+                                    navigator.sendBeacon('/api/student-exit-signal', form);
+                                }
+                            } catch (_) { }
+                        }, 800);
                     } else {
+                        if (hiddenTimer) clearTimeout(hiddenTimer);
                         this.syncWarningState();
                     }
                 });
 
-                // Only flag blur if the window stays unfocused for > 1.2s (avoids clicks inside the same tab)
-                const BLUR_THRESHOLD_MS = 1200;
-                let blurTimer = null;
-                window.addEventListener('blur', () => {
+                // Fallback: blur/focus (some browsers fire this more reliably than visibilitychange)
+                const handleBlur = () => {
                     if (this.examTerminated || !examStarted) return;
                     if (blurTimer) clearTimeout(blurTimer);
                     blurTimer = setTimeout(() => {
-                        const hidden = document.visibilityState === 'hidden';
-                        const unfocused = !document.hasFocus();
-                        if (hidden || unfocused) {
-                            raiseTabSwitch('Window lost focus for >1.2s');
+                        // Avoid double-count if a visibilitychange already fired.
+                        if ((Date.now() - lastSignalAt) < 300) return;
+                        if (document.hidden || !document.hasFocus()) {
+                            raiseTabSwitch('Tab switching detected');
                         }
-                    }, BLUR_THRESHOLD_MS);
-                });
-                window.addEventListener('focus', () => {
-                    if (blurTimer) clearTimeout(blurTimer);
-                    this.syncWarningState();
-                });
+                    }, 800);
+                };
 
-                window.addEventListener('pagehide', () => raiseTabSwitch('Page hidden'));
-                window.addEventListener('beforeunload', () => raiseTabSwitch('Page unload detected'));
+                const handleFocus = () => {
+                    if (blurTimer) clearTimeout(blurTimer);
+                };
+
+                window.addEventListener('blur', handleBlur);
+                window.addEventListener('focus', handleFocus);
             },
 
             startProhibitedActionDetection() {
@@ -3005,27 +3119,40 @@
                     const bannerTextEl = document.getElementById('warning-banner-text');
                     if (bannerEl && bannerTextEl) {
                         const flagsArr = a.active_flags ? Array.from(a.active_flags) : [];
-                        const banned = m.banned_labels ? Array.from(m.banned_labels) : [];
+                        const accessory = m.accessory || {};
+                        const baseBanned = m.banned_labels ? Array.from(m.banned_labels) : [];
+                        const hasAccessory = Boolean(accessory.earphone_detected || accessory.headphone_detected);
+                        if (hasAccessory && !baseBanned.includes('headphones')) baseBanned.push('headphones');
+                        const banned = baseBanned.length ? Array.from(new Set(baseBanned.map(l => {
+                            if (l === 'cell phone') return 'Cell Phone';
+                            if (l === 'book') return 'Book/Paper';
+                            if (l === 'clock') return 'Smartwatch';
+                            if (['headphone', 'headphones', 'headset', 'earphone', 'earphones', 'earbud', 'earbuds'].includes(l)) return 'Headphones';
+                            return l;
+                        }).map(label => {
+                            if (label === 'Cell Phone' && hasAccessory && baseBanned.length === 1) return 'Headphones';
+                            return label;
+                        }))) : [];
                         
-                        // ── Gaze Tracking (2s = ~30 frames at 15fps) ──
-                        if (m.gaze_offset > 0.28) {
-                            warningSystem.gazeAwayFrames++;
+                        // ── Gaze Direction Tracking ──
+                        const gazeDir = warningSystem.classifyGazeDirection(m.gaze_yaw_deg, m.gaze_pitch_deg);
+                        if (gazeDir && gazeDir.code !== 'CENTER') {
+                            if (warningSystem.gazeDirection !== gazeDir.code) {
+                                warningSystem.gazeDirection = gazeDir.code;
+                                warningSystem.gazeDirectionFrames = 1;
+                            } else {
+                                warningSystem.gazeDirectionFrames++;
+                            }
                         } else {
-                            warningSystem.gazeAwayFrames = 0;
+                            warningSystem.gazeDirection = null;
+                            warningSystem.gazeDirectionFrames = 0;
                         }
-                        if (warningSystem.gazeAwayFrames > 30) {
-                            if (!flagsArr.includes('GAZE_AWAY')) flagsArr.push('GAZE_AWAY');
+                        if (warningSystem.gazeDirectionFrames > 110 && gazeDir && gazeDir.flag) {
+                            if (!flagsArr.includes(gazeDir.flag)) flagsArr.push(gazeDir.flag);
                         }
 
-                        // ── Pose Tracking ──
-                        if (Math.abs(m.yaw_deg) > 28 || Math.abs(m.pitch_deg) > 22) {
-                            warningSystem.badPoseFrames++;
-                        } else {
-                            warningSystem.badPoseFrames = 0;
-                        }
-                        if (warningSystem.badPoseFrames > 15) {
-                            if (!flagsArr.includes('NOT_FORWARD')) flagsArr.push('NOT_FORWARD');
-                        }
+                        // ── Pose Tracking (disabled to reduce false positives) ──
+                        warningSystem.badPoseFrames = 0;
 
                         // ── No Face Tracking ──
                         if (m.face_count === 0) {
@@ -3033,27 +3160,38 @@
                         } else {
                             warningSystem.noFaceFrames = 0;
                         }
-                        if (warningSystem.noFaceFrames > 15) {
+                        if (warningSystem.noFaceFrames > 14) {
                             if (!flagsArr.includes('NO_FACE')) flagsArr.push('NO_FACE');
                         }
+
+                        // ── Multiple Faces ──
+                        if (m.face_count > 1) {
+                            flagsArr.push('MULTIPLE_FACES');
+                        }
+
+                        const gazeFlags = ['GAZE_LEFT', 'GAZE_RIGHT', 'GAZE_UP', 'GAZE_DOWN', 'GAZE_UP_LEFT', 'GAZE_UP_RIGHT', 'GAZE_DOWN_LEFT', 'GAZE_DOWN_RIGHT'];
+                        const activeGazeFlag = gazeFlags.find(f => flagsArr.includes(f));
 
                         let bannerActive = false;
                         let bannerMsg = "";
 
-                        if (flagsArr.includes('NO_FACE')) {
+                        if (banned.length > 0) {
+                            bannerMsg = `Warning: Prohibited object detected (${banned[0]})`;
+                            bannerActive = true;
+                        } else if (flagsArr.includes('MULTIPLE_FACES')) {
+                            bannerMsg = "Warning: Multiple faces detected!";
+                            bannerActive = true;
+                        } else if (flagsArr.includes('NO_FACE')) {
                             bannerMsg = "Warning: No face detected!";
+                            bannerActive = true;
+                        } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 3000)) {
+                            bannerMsg = "Warning: Human voice detected in room";
                             bannerActive = true;
                         } else if (flagsArr.includes('NOT_FORWARD')) {
                             bannerMsg = "Warning: Please look forward at the screen";
                             bannerActive = true;
-                        } else if (flagsArr.includes('GAZE_AWAY')) {
-                            bannerMsg = "Warning: Avoid gazing away from the screen";
-                            bannerActive = true;
-                        } else if (banned.length > 0) {
-                            bannerMsg = `Warning: Prohibited object detected (${banned[0]})`;
-                            bannerActive = true;
-                        } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 3000)) {
-                            bannerMsg = "Warning: Human voice detected in room";
+                        } else if (activeGazeFlag) {
+                            bannerMsg = warningSystem.gazeBannerForFlag(activeGazeFlag);
                             bannerActive = true;
                         }
 
@@ -3061,9 +3199,35 @@
                             bannerTextEl.innerText = bannerMsg;
                             bannerEl.classList.add('visible');
                             bannerEl.style.display = 'flex';
+                            
+                            // ── Throttle Automated Warnings ──
+                            // Don't queue dozens of warnings if the modal is already open or we just issued one.
+                            if (!warningSystem.warningModalOpen && Date.now() > warningSystem.acknowledgeGraceUntil) {
+                                // ── Critical Warnings (Immediate) ──
+                                if (banned.length > 0) {
+                                    warningSystem.addWarning({ type: 'PROHIBITED_OBJECT', details: `Prohibited object detected: ${banned[0]}`, severity: 'high', student_id: studentId });
+                                } else if (flagsArr.includes('MULTIPLE_FACES')) {
+                                    warningSystem.addWarning({ type: 'MULTIPLE_FACES', details: 'Multiple people detected in camera feed', severity: 'high', student_id: studentId });
+                                } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 2000)) {
+                                    warningSystem.addWarning({ type: 'VOICE_DETECTED', details: 'Human voice detected in room', severity: 'medium', student_id: studentId });
+                                    warningSystem.lastVoiceAlertAt = 0; // Reset after modal trigger
+                                }
+                                // ── Passive Warnings (Persistence Throttled) ──
+                                else if (flagsArr.includes('NO_FACE')) {
+                                    warningSystem.addWarning({ type: 'NO_FACE', details: 'No face detected for several seconds', severity: 'high', student_id: studentId });
+                                    warningSystem.noFaceFrames = 0;
+                                } else if (flagsArr.includes('NOT_FORWARD')) {
+                                    warningSystem.addWarning({ type: 'DISTRACTION', details: 'Please look directly at the exam screen', severity: 'medium', student_id: studentId });
+                                    warningSystem.badPoseFrames = 0;
+                                } else if (activeGazeFlag) {
+                                    warningSystem.addWarning({ type: 'DISTRACTION', details: warningSystem.gazeBannerForFlag(activeGazeFlag).replace('Warning: ', ''), severity: 'medium', student_id: studentId });
+                                    warningSystem.gazeDirection = null;
+                                    warningSystem.gazeDirectionFrames = 0;
+                                }
+                            }
                         } else {
-                             // Only hide if not manually shown by voice_alert or other events
                              bannerEl.classList.remove('visible');
+                             bannerEl.style.display = 'none';
                         }
                     }
 
@@ -3361,12 +3525,12 @@
             started: false,
             cooldownUntil: 0,
             speakingSince: 0,
-            minSpeechMs: 200,           // sustained speech trigger (fast)
-            longSpeechMs: 450,          // long continuous speech trigger
+            minSpeechMs: 160,           // sustained speech trigger (normal)
+            longSpeechMs: 360,          // long continuous speech trigger
             cumulativeSpeechMs: 0,      // rolling talk-time bucket
             bucketWindowMs: 12000,
             bucketResetAt: 0,
-            minRms: 0.003,
+            minRms: 0.0018,
             noiseFloor: null,
             micWarnCooldownUntil: 0,
             audioTrack: null,
@@ -3374,6 +3538,9 @@
             calibrationUntil: 0,
             voicedFrames: 0,
             missFrames: 0,
+            calibrationMs: 600,
+            voiceTestActive: false,
+            voiceTestDetected: false,
             // Removed local VAD loop for Phase 15
 
             warnMicOff(details) {
@@ -3414,6 +3581,8 @@
                         this.audioTrack.addEventListener('mute', () => {
                             if (examStarted && !warningSystem.examTerminated) this.warnMicOff('Microphone muted/unavailable');
                         });
+                    } else {
+                        this.warnMicOff('Microphone track unavailable');
                     }
                     this.context = new AudioCtx();
                     if (this.context.state === 'suspended') {
@@ -3423,7 +3592,7 @@
                     this.analyser.fftSize = 1024;
                     this.source = this.context.createMediaStreamSource(this.stream);
                     this.source.connect(this.analyser);
-                    this.calibrationUntil = Date.now() + 300; // short 300ms ambient calibration only
+                    this.calibrationUntil = Date.now() + this.calibrationMs; // short ambient calibration
 
                     // Record complete mic audio for admin recordings evidence.
                     if (typeof MediaRecorder !== 'undefined') {
@@ -3439,7 +3608,7 @@
                         }
                     }
                     this.started = true;
-                    // Removed local detection loop; only streaming to server now.
+                    this.loop();
                 } catch (e) {
                     console.log('Voice monitor unavailable:', e);
                 }
@@ -3470,7 +3639,7 @@
                 const timeBuf = new Float32Array(this.analyser.fftSize);
                 const freqBuf = new Uint8Array(this.analyser.frequencyBinCount);
                 this.timer = setInterval(() => {
-                    if (!this.started || !examStarted || warningSystem.examTerminated) return;
+                    if (!this.started || ( !examStarted && !this.voiceTestActive ) || warningSystem.examTerminated) return;
                     if (this.context && this.context.state === 'suspended') {
                         this.context.resume().catch(() => { });
                     }
@@ -3520,12 +3689,14 @@
                     const dominantHz = domIdx * hzPerBin;
                     const inCalibration = Date.now() < this.calibrationUntil;
                     const energyGate = rms >= dynRmsThreshold;
-                    const speechBandGate = speechRatio >= 0.15 && speechBand >= 8;
-                    const frequencyGate = dominantHz >= 70 && dominantHz <= 3400;
-                    const nonWindGate = windRatio <= 0.75;
-                    const zcrGate = zcr >= 0.001 && zcr <= 0.50;
-                    const backupVoiceGate = (rms >= (dynRmsThreshold * 1.2)) && (speechRatio >= 0.12);
-                    const looksLikeHumanVoice = (!inCalibration) && ((energyGate && speechBandGate && frequencyGate && nonWindGate && zcrGate) || backupVoiceGate);
+                    const speechBandGate = speechRatio >= 0.08 && speechBand >= 3;
+                    const frequencyGate = dominantHz >= 50 && dominantHz <= 4500;
+                    const nonWindGate = windRatio <= 0.65;
+                    const zcrGate = zcr >= 0.0005 && zcr <= 0.55;
+                    const whisperGate = (rms >= (dynRmsThreshold * 0.9)) && (speechRatio >= 0.14) && frequencyGate && nonWindGate;
+                    const backupVoiceGate = (rms >= (dynRmsThreshold * 1.05)) && (speechRatio >= 0.07);
+                    const rmsBurst = rms >= (dynRmsThreshold * 1.9);
+                    const looksLikeHumanVoice = (!inCalibration) && ((energyGate && speechBandGate && frequencyGate && nonWindGate && zcrGate) || whisperGate || backupVoiceGate || rmsBurst);
 
                     const now = Date.now();
                     if (now - this.lastAudioDebugAt >= 2000) {
@@ -3547,6 +3718,15 @@
                         this.bucketResetAt = now + this.bucketWindowMs;
                     }
                     if (looksLikeHumanVoice) {
+                        if (this.voiceTestActive) {
+                            this.voiceTestDetected = true;
+                            const vts = document.getElementById('voiceTestStatus');
+                            if (vts) {
+                                vts.style.display = 'block';
+                                vts.style.color = '#10b981';
+                                vts.textContent = 'Voice detected. Test passed.';
+                            }
+                        }
                         this.missFrames = 0;
                         if (!this.speakingSince) this.speakingSince = now;
                         const speechMs = now - this.speakingSince;
@@ -3557,18 +3737,20 @@
 
                         const sustainedTalking = speechMs >= this.minSpeechMs;
                         const veryLongTalking = speechMs >= this.longSpeechMs;
-                        const repeatedTalking = this.cumulativeSpeechMs >= 500;
-                        const enoughVoicedFrames = this.voicedFrames >= 2;
+                        const repeatedTalking = this.cumulativeSpeechMs >= 450;
+                        const enoughVoicedFrames = this.voicedFrames >= 1;
+                        const rmsBurstLocal = rms >= (dynRmsThreshold * 1.7);
 
-                        if (((sustainedTalking && (repeatedTalking || enoughVoicedFrames)) || veryLongTalking) && now >= this.cooldownUntil) {
-                            this.cooldownUntil = now + 4000;  // 4s between voice warnings
+                        if (((sustainedTalking && (repeatedTalking || enoughVoicedFrames)) || veryLongTalking || rmsBurstLocal) && now >= this.cooldownUntil) {
+                            this.cooldownUntil = now + 3500;  // 3.5s between voice warnings
                             this.speakingSince = 0;
                             this.cumulativeSpeechMs = 0;
                             this.voicedFrames = 0;
                             this.missFrames = 0;
+                            warningSystem.lastVoiceAlertAt = Date.now();
                             warningSystem.addWarning({
                                 type: 'VOICE_DETECTED',
-                                details: 'Continuous human voice detected from microphone',
+                                details: 'Human voice detected in exam environment',
                                 severity: 'medium',
                                 student_id: studentId
                             });
@@ -3967,27 +4149,6 @@
             </div>
             
             <button class="btn-proctor" onclick="if(window.warningSystem) window.warningSystem.closeObservationModal()">I Understand</button>
-        </div>
-    </div>
-
-    <!-- Termination Modal -->
-    <div id="exam-termination-modal" class="proctor-modal">
-        <div class="proctor-modal-content" style="max-width: 600px;">
-            <div class="proctor-modal-icon" style="background: var(--danger); -webkit-text-fill-color: white; width: 80px; height: 80px; display:flex; align-items:center; justify-content:center; border-radius:50%; margin: 0 auto 25px;">
-                <i class="fas fa-times-circle"></i>
-            </div>
-            <div class="proctor-modal-header" style="color:var(--danger)">Exam Terminated</div>
-            <p style="color:#475569; font-weight: 600;" id="termination-reason">Your session has been terminated due to multiple proctoring violations.</p>
-            
-            <div class="termination-summary">
-                <h6 style="font-weight: 800; color: #9f1239; margin-bottom: 10px;">PROCTORING INTEGRITY REPORT</h6>
-                <p id="term-stats">--</p>
-                <div id="term-objects" style="font-weight: 700;">--</div>
-                <hr style="border-color: #fecaca;">
-                <p style="font-size: 12px; color: #b91c1c; margin: 0;">This report has been logged and sent to your institution. Re-entry is prohibited.</p>
-            </div>
-            
-            <button class="btn-proctor" style="background: #0f172a; margin-top: 25px;" onclick="window.location.href='/'">Exit System</button>
         </div>
     </div>
 

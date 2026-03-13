@@ -18,12 +18,12 @@ if hasattr(sys.stdout, "reconfigure"):
 class WarningSystem:
     """Track warnings per student and emit events when thresholds reached."""
     
-    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=5):
+    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=3):
         self.socketio = socketio_instance
         self.admin_monitor = admin_monitor
         self.max_warnings = max_warnings
         auto_env = os.getenv('AUTO_TERMINATE_DEFAULT', '1')
-        # Default ON so the Nth warning is shown then termination occurs after 3 seconds.
+        # Default ON so the Nth warning is shown then termination occurs after ~2 seconds.
         self.auto_terminate = str(auto_env).strip() not in ('0', 'false', 'False')
         self.lock = threading.Lock()
         self.warnings = {}  # student_id -> count
@@ -34,7 +34,7 @@ class WarningSystem:
         self.termination_timer = {}  # student_id -> Timer handle
 
         # Global minimum gap between any two warnings (seconds)
-        self.global_gap_seconds = 5.0
+        self.global_gap_seconds = 4.0
         # Per-type gaps — critical items fire faster; minor distractions fire slower
         self.type_gap_seconds = {
             # Immediate threats — fire quickly but not spam
@@ -54,6 +54,10 @@ class WarningSystem:
             'GAZE_RIGHT':          10.0,
             'GAZE_UP':             10.0,
             'GAZE_DOWN':           10.0,
+            'GAZE_UP_LEFT':        10.0,
+            'GAZE_UP_RIGHT':       10.0,
+            'GAZE_DOWN_LEFT':      10.0,
+            'GAZE_DOWN_RIGHT':     10.0,
         }
         self.type_gap_seconds['TERMINATED_BY_ADMIN'] = 0.0
 
@@ -163,7 +167,7 @@ class WarningSystem:
                         'warnings': count
                     }, namespace='/admin')
                 return False
-            # Auto-terminate, but after a 3s grace so 3rd warning shows
+            # Auto-terminate, but after a ~2s grace so 3rd warning shows
             def do_term():
                 reason = f"Reached {self.max_warnings} warnings for violations: {vtype}"
                 print(f"🚨 TERMINATING EXAM for student {student_id}: {reason}")
@@ -184,7 +188,7 @@ class WarningSystem:
             except Exception:
                 pass
             import threading
-            t = threading.Timer(3.0, do_term)
+            t = threading.Timer(2.0, do_term)
             self.termination_timer[sid] = t
             t.start()
             return True  # termination scheduled
