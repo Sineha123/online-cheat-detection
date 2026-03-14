@@ -512,6 +512,9 @@
             <button class="nav-btn" onclick="goBack()">
                 ⬅ Back to Dashboard
             </button>
+            <a class="nav-btn" href="/adminProfile">
+                👤 Profile
+            </a>
             <button class="nav-btn btn-logout" onclick="logout()">
                 🚪 Logout
             </button>
@@ -533,7 +536,7 @@
         </div>
         <div class="stat-card">
             <h3 id="active-violations">0</h3>
-            <p>Active Violations</p>
+            <p>Total Violations</p>
         </div>
     </div>
 
@@ -624,6 +627,7 @@
         let studentsData = {};
         let totalWarnings = 0;
         let terminatedExams = 0;
+        let lastDashboardUpdateAt = 0;
         let currentStreamingStudent = null;
         let pollHealthyUntil = 0;
         const telemetryV2ByStudent = new Map();
@@ -722,6 +726,11 @@
                 updateDashboard(true);
             } else {
                 refreshStudentTelemetryRow(sid);
+            }
+
+            if (Date.now() - lastDashboardUpdateAt > 1500) {
+                updateDashboard(false);
+                lastDashboardUpdateAt = Date.now();
             }
 
             // If this is the currently viewed student, update the modal panel
@@ -930,7 +939,7 @@
                 };
             }
 
-            studentsData[key].warnings = data.total_warnings || 0;
+            studentsData[key].warnings = Math.min(data.total_warnings || 0, 3);
             studentsData[key].violations = studentsData[key].violations || [];
             studentsData[key].lastUpdate = Date.now();
             if (!studentsData[key].startTime) {
@@ -938,12 +947,13 @@
             }
             if (data.violation) {
                 studentsData[key].violations.push(data.violation);
+                if (studentsData[key].violations.length > 3) {
+                    studentsData[key].violations = studentsData[key].violations.slice(-3);
+                }
             }
             if (studentsData[key].warnings >= 3 && !studentsData[key].endTime) {
                 studentsData[key].endTime = Date.now();
             }
-
-            totalWarnings++;
 
             updateDashboard();
 
@@ -1090,14 +1100,28 @@
             // Update stats
             const activeStudents = Object.keys(studentsData).length;
             document.getElementById('total-students').textContent = activeStudents;
-            document.getElementById('total-warnings').textContent = totalWarnings;
             document.getElementById('terminated-exams').textContent = terminatedExams;
 
+            let warningSum = 0;
+            let violationSum = 0;
             let activeViolations = 0;
             Object.values(studentsData).forEach(student => {
-                if (student.warnings > 0) activeViolations++;
+                const warnings = Math.min(Number(student.warnings || 0), 3);
+                const violations = Math.min((student.violations || []).length, 3);
+                warningSum += warnings;
+                violationSum += violations;
+
+                const hasLiveViolation =
+                    violations > 0 ||
+                    (Array.isArray(student.banned_labels) && student.banned_labels.length > 0) ||
+                    student.face_count === 0 ||
+                    student.face_count > 1;
+                if (hasLiveViolation) activeViolations++;
             });
-            document.getElementById('active-violations').textContent = activeViolations;
+
+            totalWarnings = warningSum;
+            document.getElementById('total-warnings').textContent = totalWarnings;
+            document.getElementById('active-violations').textContent = violationSum;
 
             // Update students grid only when structure changes
             if (updateGrid) {
@@ -1122,6 +1146,7 @@
                             structureChanged = true;
                             studentsData[sid] = {
                                 ...student,
+                                warnings: Math.min(student.warnings || 0, 3),
                                 startTime: Date.now(),
                                 endTime: null,
                                 lastUpdate: Date.now(),
@@ -1131,6 +1156,7 @@
                             studentsData[sid] = {
                                 ...studentsData[sid],
                                 ...student,
+                                warnings: Math.min(student.warnings || 0, 3),
                                 startTime: studentsData[sid].startTime || Date.now(),
                                 lastUpdate: Date.now(),
                                 endTime: studentsData[sid].endTime || (student.warnings >= 3 ? Date.now() : null)
@@ -1176,12 +1202,6 @@
 
             const warningLevel = Math.min(student.warnings || 0, 3);
             const warningClass = `warning-${warningLevel}`;
-            const safetyLevel = (student.safety_level === null || student.safety_level === undefined) ? '--' : `${student.safety_level}`;
-            const suspicionScore = (student.suspicion_score === null || student.suspicion_score === undefined) ? '--' : `${student.suspicion_score}`;
-            const verdict = student.verdict || '--';
-            const integrity = (student.integrity_verified === null || student.integrity_verified === undefined)
-                ? '--'
-                : (student.integrity_verified ? 'OK' : 'FAIL');
             const tamperBadge = student.tamperFlagged
                 ? `<div class="warning-pill warning-3" style="left:10px; right:auto;">🛡️ Tamper ${student.tamperMismatch || ''}</div>`
                 : '';
@@ -1214,24 +1234,16 @@
                     <div class="info-row">
                         <span class="info-label">Warnings:</span>
                         <span class="warning-badge ${warningClass}">
-                            ${student.warnings || 0}/3
+                            ${warningLevel}/3
                         </span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">Violations:</span>
-                        <span class="info-value">${student.violations?.length || 0}</span>
+                        <span class="info-value">${Math.min(student.violations?.length || 0, 3)}</span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">Duration:</span>
                         <span class="info-value">${durationText}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Suspicion/Safety:</span>
-                        <span class="info-value" id="telemetry-${student.student_id}">${suspicionScore} / ${safetyLevel}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Verdict/Integrity:</span>
-                        <span class="info-value" id="integrity-${student.student_id}">${verdict} / ${integrity}</span>
                     </div>
 
                     <!-- Enhanced Threat Matrix -->
@@ -1294,22 +1306,6 @@
             if (!student) return;
 
             const score = student.suspicion_score ?? 0;
-
-            const telemetryEl = document.getElementById(`telemetry-${sid}`);
-            if (telemetryEl) {
-                const suspicion = (student.suspicion_score === null || student.suspicion_score === undefined) ? '--' : student.suspicion_score;
-                const safety = (student.safety_level === null || student.safety_level === undefined) ? '--' : student.safety_level;
-                telemetryEl.textContent = `${suspicion} / ${safety}`;
-            }
-
-            const integrityEl = document.getElementById(`integrity-${sid}`);
-            if (integrityEl) {
-                const verdict = student.verdict || '--';
-                const integrity = (student.integrity_verified === null || student.integrity_verified === undefined)
-                    ? '--'
-                    : (student.integrity_verified ? 'OK' : 'FAIL');
-                integrityEl.textContent = `${verdict} / ${integrity}`;
-            }
 
             // Update card badge color based on score
             const card = document.getElementById(`student-${sid}`);
@@ -1764,15 +1760,16 @@
                         stu.lastUpdate = Date.now();
                         if (!stu.startTime) stu.startTime = info.start_time || Date.now();
                         // Update warnings count from server truth
-                        if (stu.warnings !== info.warnings) {
-                            stu.warnings = info.warnings;
-                            totalWarnings = Math.max(totalWarnings, info.warnings);
+                        const cappedWarnings = Math.min(info.warnings || 0, 3);
+                        if (stu.warnings !== cappedWarnings) {
+                            stu.warnings = cappedWarnings;
+                            totalWarnings = Math.max(totalWarnings, cappedWarnings);
                             if (stu.warnings >= 3 && !stu.endTime) stu.endTime = Date.now();
                             changed = true;
                         }
                         // Merge violations
                         if (info.violations && info.violations.length > (stu.violations || []).length) {
-                            stu.violations = info.violations;
+                            stu.violations = info.violations.slice(-3);
                             changed = true;
                         }
                     });

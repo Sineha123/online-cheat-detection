@@ -2074,16 +2074,21 @@
         // TIMER FUNCTIONS
         // ============================================
         function startTimer() {
-            updateTimerDisplay();
-            timerInterval = setInterval(function () {
+            const startAt = Date.now();
+            const totalSeconds = EXAM_DURATION_SECONDS;
+            if (timerInterval) clearInterval(timerInterval);
+            const tick = () => {
+                const elapsed = Math.floor((Date.now() - startAt) / 1000);
+                timeLeft = Math.max(0, totalSeconds - elapsed);
+                updateTimerDisplay();
                 if (timeLeft <= 0) {
                     clearInterval(timerInterval);
                     if (examStarted) finishExam();
-                    return;
                 }
-                timeLeft--;
-                updateTimerDisplay();
-            }, 1000);
+            };
+            tick();
+            timerInterval = setInterval(tick, 1000);
+            window.timerInterval = timerInterval;
         }
 
         function updateTimerDisplay() {
@@ -2188,6 +2193,7 @@
             gazeAwayFrames: 0,
             badPoseFrames: 0,
             noFaceFrames: 0,
+            faceObscuredFrames: 0,
             gazeDirection: null,
             gazeDirectionFrames: 0,
             syncTimer: null,
@@ -2213,6 +2219,7 @@
                 'GAZE_AWAY': 4000,
                 'NOT_FORWARD': 4000,
                 'NO_FACE': 4000,
+                'FACE_OBSCURED': 5000,
                 'GAZE_LEFT': 4000,
                 'GAZE_RIGHT': 4000,
                 'GAZE_UP': 4000,
@@ -2664,7 +2671,7 @@
                 // Assumed thresholds (center, hard left/right, diagonals)
                 const CENTER_YAW = 16;
                 const CENTER_PITCH = 16;
-                const HARD_YAW = 42;
+                const HARD_YAW = 50;
 
                 if (Math.abs(yaw) <= CENTER_YAW && Math.abs(pitch) <= CENTER_PITCH) {
                     return { code: 'CENTER', flag: null, label: 'Center' };
@@ -3147,12 +3154,24 @@
                             warningSystem.gazeDirection = null;
                             warningSystem.gazeDirectionFrames = 0;
                         }
-                        if (warningSystem.gazeDirectionFrames > 110 && gazeDir && gazeDir.flag) {
+                        if (warningSystem.gazeDirectionFrames > 75 && gazeDir && gazeDir.flag) {
                             if (!flagsArr.includes(gazeDir.flag)) flagsArr.push(gazeDir.flag);
                         }
 
                         // ── Pose Tracking (disabled to reduce false positives) ──
                         warningSystem.badPoseFrames = 0;
+
+                        // ── Face Obscured Tracking (burqa/cover) ──
+                        const lightingOk = Number(m.lighting_score || 0) >= 0.35;
+                        const faceObscured = Boolean(m.lighting_visibility_compromised) && lightingOk && Number(m.face_count || 0) > 0;
+                        if (faceObscured) {
+                            warningSystem.faceObscuredFrames++;
+                        } else {
+                            warningSystem.faceObscuredFrames = 0;
+                        }
+                        if (warningSystem.faceObscuredFrames > 40) {
+                            if (!flagsArr.includes('FACE_OBSCURED')) flagsArr.push('FACE_OBSCURED');
+                        }
 
                         // ── No Face Tracking ──
                         if (m.face_count === 0) {
@@ -3180,6 +3199,9 @@
                             bannerActive = true;
                         } else if (flagsArr.includes('MULTIPLE_FACES')) {
                             bannerMsg = "Warning: Multiple faces detected!";
+                            bannerActive = true;
+                        } else if (flagsArr.includes('FACE_OBSCURED')) {
+                            bannerMsg = "Warning: Face appears covered/obscured";
                             bannerActive = true;
                         } else if (flagsArr.includes('NO_FACE')) {
                             bannerMsg = "Warning: No face detected!";
@@ -3213,7 +3235,10 @@
                                     warningSystem.lastVoiceAlertAt = 0; // Reset after modal trigger
                                 }
                                 // ── Passive Warnings (Persistence Throttled) ──
-                                else if (flagsArr.includes('NO_FACE')) {
+                                else if (flagsArr.includes('FACE_OBSCURED')) {
+                                    warningSystem.addWarning({ type: 'FACE_OBSCURED', details: 'Face appears covered/obscured', severity: 'high', student_id: studentId });
+                                    warningSystem.faceObscuredFrames = 0;
+                                } else if (flagsArr.includes('NO_FACE')) {
                                     warningSystem.addWarning({ type: 'NO_FACE', details: 'No face detected for several seconds', severity: 'high', student_id: studentId });
                                     warningSystem.noFaceFrames = 0;
                                 } else if (flagsArr.includes('NOT_FORWARD')) {

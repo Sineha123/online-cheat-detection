@@ -1265,6 +1265,7 @@ def examAction():
     VTYPE_MAP = {
         'multiple_faces': 'MULTIPLE_FACES', 'MULTIPLE_FACES': 'MULTIPLE_FACES',
         'no_face': 'NO_FACE', 'NO_FACE': 'NO_FACE',
+        'FACE_OBSCURED': 'NO_FACE', 'face_obscured': 'NO_FACE',
         'eyes_closed': 'EYES_CLOSED', 'EYES_CLOSED': 'EYES_CLOSED',
         'gaze_left': 'GAZE_LEFT', 'GAZE_LEFT': 'GAZE_LEFT',
         'gaze_right': 'GAZE_RIGHT', 'GAZE_RIGHT': 'GAZE_RIGHT',
@@ -1634,8 +1635,8 @@ def adminResults():
 @require_role('ADMIN')
 def adminRecordings():
     """List saved exam session videos and audio recordings."""
-    video_dir = os.path.join('static', 'exam_sessions')
-    audio_dir = os.path.join('static', 'audio_recordings')
+    video_dir = os.path.join('static', 'recording')
+    audio_dir = os.path.join('static', 'recording', 'audio')
     videos = []
     audios = []
 
@@ -1762,6 +1763,33 @@ def adminRecordings():
     audios.sort(key=lambda x: x['mtime'], reverse=True)
     return render_template('Recordings.html', videos=videos, audios=audios)
 
+@app.route('/adminProfile')
+@require_role('ADMIN')
+def adminProfile():
+    """Admin profile page."""
+    admin = current_admin() or {}
+    admin_id = admin.get('Id')
+    admin_info = {
+        'id': admin_id,
+        'name': admin.get('Name') or 'Admin',
+        'email': admin.get('Email') or '',
+        'profile': None
+    }
+    try:
+        if admin_id:
+            cur = mysql.connection.cursor()
+            cur.execute("SELECT ID, Name, Email, Profile FROM students WHERE ID=%s LIMIT 1", (admin_id,))
+            row = cur.fetchone()
+            cur.close()
+            if row:
+                admin_info['id'] = row[0]
+                admin_info['name'] = row[1] or admin_info['name']
+                admin_info['email'] = row[2] or admin_info['email']
+                admin_info['profile'] = row[3]
+    except Exception as e:
+        logger.error(f"adminProfile load error: {e}", exc_info=True)
+    return render_template('admin_profile.html', admin=admin_info)
+
 def _safe_send_from_dir(base_dir, filename):
     """Send file from a base directory safely."""
     if not filename or '..' in filename or filename.startswith(('/', '\\')):
@@ -1776,12 +1804,12 @@ def _safe_send_from_dir(base_dir, filename):
 @app.route('/download/recording/video/<path:filename>')
 @require_role('ADMIN')
 def download_recording_video(filename):
-    return _safe_send_from_dir(os.path.join('static', 'exam_sessions'), filename)
+    return _safe_send_from_dir(os.path.join('static', 'recording'), filename)
 
 @app.route('/download/recording/audio/<path:filename>')
 @require_role('ADMIN')
 def download_recording_audio(filename):
-    return _safe_send_from_dir(os.path.join('static', 'audio_recordings'), filename)
+    return _safe_send_from_dir(os.path.join('static', 'recording', 'audio'), filename)
 
 @app.route('/adminStudents')
 @require_role('ADMIN')
@@ -2246,7 +2274,7 @@ def api_upload_audio():
         elif 'mp4' in content_type or 'm4a' in content_type:
             ext = '.m4a'
 
-        audio_dir = os.path.join('static', 'audio_recordings')
+        audio_dir = os.path.join('static', 'recording', 'audio')
         os.makedirs(audio_dir, exist_ok=True)
         filename = f"{student_id}_{student_name}_{timestamp}{ext}"
         file.save(os.path.join(audio_dir, filename))
@@ -2291,7 +2319,7 @@ def api_upload_session_recording():
             if guessed_ext in ('.webm', '.mp4', '.ogg', '.mkv'):
                 ext = guessed_ext
 
-        video_dir = os.path.join('static', 'exam_sessions')
+        video_dir = os.path.join('static', 'recording')
         os.makedirs(video_dir, exist_ok=True)
         filename = f"{student_id}_{student_name}_{session_start}{ext}"
         output_path = os.path.join(video_dir, filename)
@@ -2526,6 +2554,7 @@ if MONITORING_ENABLED and socketio:
             'COPY_PASTE': 'PROHIBITED_SHORTCUT',
             'MULTIPLE_FACES': 'MULTIPLE_FACES', 'multiple_faces': 'MULTIPLE_FACES',
             'NO_FACE': 'NO_FACE', 'no_face': 'NO_FACE',
+            'FACE_OBSCURED': 'NO_FACE', 'face_obscured': 'NO_FACE',
             'EYES_CLOSED': 'EYES_CLOSED', 'eyes_closed': 'EYES_CLOSED',
             'GAZE_LEFT': 'GAZE_LEFT', 'gaze_left': 'GAZE_LEFT',
             'GAZE_RIGHT': 'GAZE_RIGHT', 'gaze_right': 'GAZE_RIGHT',
