@@ -618,9 +618,10 @@
             transports: ['websocket', 'polling'],
             reconnection: true,
             reconnectionAttempts: Infinity,
-            reconnectionDelay: 800,
-            reconnectionDelayMax: 3000,
-            timeout: 8000
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            timeout: 20000,
+            withCredentials: true,
         });
         const CSRF_TOKEN = "{{ csrf_token() }}";
 
@@ -721,6 +722,19 @@
             studentsData[sid].face_count = data.metrics?.face_count ?? null;
             studentsData[sid].person_count = data.metrics?.person_count ?? null;
             studentsData[sid].metrics = data.metrics || {};
+            if (typeof data.warnings === 'number') {
+                studentsData[sid].warnings = Math.min(Number(data.warnings), 3);
+            }
+            if (Array.isArray(data.violations) && data.violations.length > 0) {
+                studentsData[sid].violations = data.violations.slice(-5);
+            }
+            if (data.start_time) {
+                const startMs = normalizeTimestamp(data.start_time);
+                if (startMs && (!studentsData[sid].startTime || startMs > studentsData[sid].startTime)) {
+                    studentsData[sid].startTime = startMs;
+                    studentsData[sid].endTime = null;
+                }
+            }
 
             if (created) {
                 updateDashboard(true);
@@ -904,7 +918,7 @@
                         // New student
                         studentsData[key] = {
                             ...student,
-                            startTime: null,
+                            startTime: normalizeTimestamp(student.start_time || student.startTime) || null,
                             violations: student.violations || [],
                             lastFrame: null
                         };
@@ -913,12 +927,45 @@
                         // Update existing student
                         studentsData[key] = {
                             ...studentsData[key],
-                            ...student
+                            ...student,
+                            startTime: studentsData[key].startTime || normalizeTimestamp(student.start_time || student.startTime) || null
                         };
                     }
                 });
             }
             updateDashboard();
+        });
+
+        // Exam lifecycle signals
+        socket.on('student_exam_started', function (data) {
+            const sid = String(data.student_id || '');
+            if (!sid) return;
+            const startTime = normalizeTimestamp(data.start_time) || Date.now();
+            const existing = studentsData[sid] || {};
+            studentsData[sid] = {
+                ...existing,
+                student_id: sid,
+                student_name: data.student_name || existing.student_name || `Student ${sid}`,
+                warnings: 0,
+                violations: [],
+                startTime: startTime,
+                endTime: null,
+                lastUpdate: Date.now()
+            };
+            updateDashboard(true);
+        });
+
+        socket.on('student_exam_completed', function (data) {
+            const sid = String(data.student_id || '');
+            if (!sid) return;
+            if (studentsData[sid]) {
+                studentsData[sid].endTime = normalizeTimestamp(data.ended_at) || Date.now();
+            }
+            if (currentStreamingStudent == sid) {
+                closeLiveFeed();
+            }
+            delete studentsData[sid];
+            updateDashboard(true);
         });
 
         // Handle student violations
@@ -980,13 +1027,45 @@
             studentsData[key].lastFrame = data.frame;
             studentsData[key].lastUpdate = Date.now();
             if (!studentsData[key].startTime) studentsData[key].startTime = Date.now();
+            if (typeof data.warnings === 'number') {
+                studentsData[key].warnings = Math.min(Number(data.warnings), 3);
+            } else if (typeof data.score === 'number' && studentsData[key].warnings == null) {
+                studentsData[key].warnings = studentsData[key].warnings || 0;
+            }
+            if (Array.isArray(data.violations) && data.violations.length > 0) {
+                studentsData[key].violations = data.violations.slice(-3);
+            }
+            if (typeof data.score === 'number') {
+                studentsData[key].suspicion_score = data.score;
+            }
 
             // Update mini feed in student card
             updateStudentCardFrame(key, data.frame);
+            refreshStudentTelemetryRow(key);
 
             // Also update modal if viewing this student
             if (currentStreamingStudent == key && data.frame) {
                 updateModalFrame(data.frame);
+            }
+        });
+
+        // Server signals that the first live frame from a student has arrived
+        // Use this to immediately hide the loading spinner and reveal the frame
+        socket.on('feed_started', function (data) {
+            const key = String(data.student_id || '');
+            if (!key) return;
+            // Hide any loading indicator inside the student card
+            const card = document.getElementById(`student-${key}`);
+            if (card) {
+                const loadingEl = card.querySelector('.loading-placeholder, .no-feed-placeholder');
+                if (loadingEl) loadingEl.style.display = 'none';
+            }
+            // If this is the currently viewed student in the modal, swap from MJPEG to socket frames
+            if (currentStreamingStudent == key) {
+                const loadingEl = document.getElementById('modal-loading');
+                const modalFeed = document.getElementById('modal-live-feed');
+                if (loadingEl) loadingEl.style.display = 'none';
+                if (modalFeed) modalFeed.style.display = 'block';
             }
         });
 
@@ -1160,7 +1239,9 @@
                                 ...studentsData[sid],
                                 ...student,
                                 warnings: Math.min(student.warnings || 0, 3),
-                                startTime: studentsData[sid].startTime || startMs || Date.now(),
+                                startTime: (startMs && (!studentsData[sid].startTime || startMs > studentsData[sid].startTime))
+                                    ? startMs
+                                    : (studentsData[sid].startTime || startMs || Date.now()),
                                 lastUpdate: lastUpdateMs || Date.now(),
                                 endTime: studentsData[sid].endTime || (student.warnings >= 3 ? Date.now() : null)
                             };
@@ -1192,15 +1273,19 @@
         function updateStudentsGrid() {
             const grid = document.getElementById('students-grid');
             const students = Object.values(studentsData);
+            const loadingMsg = document.getElementById('loading-message');
 
             if (students.length === 0) {
-                document.getElementById('loading-message').style.display = 'block';
-                document.getElementById('loading-message').innerHTML =
-                    '<p>🔄 Waiting for students to start exams...</p>';
+                if (loadingMsg) {
+                    loadingMsg.style.display = 'block';
+                    loadingMsg.innerHTML = '<p>🔄 Waiting for students to start exams...</p>';
+                } else {
+                    grid.innerHTML = '<div class="loading" id="loading-message"><p>🔄 Waiting for students to start exams...</p></div>';
+                }
                 return;
             }
 
-            document.getElementById('loading-message').style.display = 'none';
+            if (loadingMsg) loadingMsg.style.display = 'none';
             grid.innerHTML = '';
 
             students.forEach(student => {
@@ -1377,7 +1462,7 @@
                 const yaw = Math.round(metrics.yaw_deg || 0);
                 const pitch = Math.round(metrics.pitch_deg || 0);
                 poseEl.textContent = `Y:${yaw}° / P:${pitch}°`;
-                if (Math.abs(yaw) > 28 || Math.abs(pitch) > 22) {
+                if (Math.abs(yaw) > 18 || Math.abs(pitch) > 14) {
                     poseEl.classList.add('threat-high');
                 } else {
                     poseEl.classList.remove('threat-high');
@@ -1389,7 +1474,7 @@
                 const metrics = student.metrics || {};
                 const offset = (metrics.gaze_offset || 0).toFixed(2);
                 gazeEl.textContent = offset;
-                if (metrics.gaze_offset > 0.28) {
+                if (metrics.gaze_offset > 0.2) {
                     gazeEl.classList.add('threat-high');
                 } else {
                     gazeEl.classList.remove('threat-high');
@@ -1805,6 +1890,24 @@
                 const durationEl = card.querySelector('[data-role="duration"]');
                 if (durationEl) {
                     durationEl.textContent = formatDuration(studentsData[key]);
+                }
+                const history = telemetryV2ByStudent.get(key);
+                if (history && history.length > 0) {
+                    const latest = history[history.length - 1];
+                    const stu = studentsData[key];
+                    if (stu) {
+                        if (latest.metrics) stu.metrics = latest.metrics;
+                        if (latest.analysis && Array.isArray(latest.analysis.active_flags)) {
+                            stu.active_flags = latest.analysis.active_flags;
+                        }
+                        if (typeof latest.analysis?.suspicion_score === 'number') {
+                            stu.suspicion_score = latest.analysis.suspicion_score;
+                        }
+                        if (typeof latest.warnings === 'number') {
+                            stu.warnings = Math.min(3, Number(latest.warnings));
+                        }
+                        refreshStudentTelemetryRow(key);
+                    }
                 }
             });
             updateDashboard(false);

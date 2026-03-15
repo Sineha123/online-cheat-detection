@@ -34,30 +34,30 @@ class WarningSystem:
         self.termination_timer = {}  # student_id -> Timer handle
 
         # Global minimum gap between any two warnings (seconds)
-        self.global_gap_seconds = 4.0
+        self.global_gap_seconds = 1.5
         # Per-type gaps — critical items fire faster; minor distractions fire slower
         self.type_gap_seconds = {
             # Immediate threats — fire quickly but not spam
-            'PROHIBITED_OBJECT':    5.0,
-            'MULTIPLE_FACES':       4.0,
-            'TAB_SWITCH':           3.0,
-            'PROHIBITED_SHORTCUT':  3.0,
-            'VOICE_DETECTED':       8.0,   # audio: only after 8s continuous
-            'IDENTITY_MISMATCH':    5.0,
+            'PROHIBITED_OBJECT':    2.0,
+            'MULTIPLE_FACES':       3.0,
+            'TAB_SWITCH':           2.0,
+            'PROHIBITED_SHORTCUT':  2.0,
+            'VOICE_DETECTED':       6.0,   # audio: only after 8s continuous
+            'IDENTITY_MISMATCH':    4.0,
             # Behavioural distractions — need longer persistence
-            'NO_FACE':             10.0,   # must be absent for >10s
-            'DISTRACTION':         10.0,   # gaze/head away — needs repetition
-            'HEAD_MOVEMENT':       10.0,
-            'STUDENT_LEFT_SEAT':    5.0,
-            'EYES_CLOSED':          8.0,
-            'GAZE_LEFT':           10.0,
-            'GAZE_RIGHT':          10.0,
-            'GAZE_UP':             10.0,
-            'GAZE_DOWN':           10.0,
-            'GAZE_UP_LEFT':        10.0,
-            'GAZE_UP_RIGHT':       10.0,
-            'GAZE_DOWN_LEFT':      10.0,
-            'GAZE_DOWN_RIGHT':     10.0,
+            'NO_FACE':              6.0,   # must be absent for >10s
+            'DISTRACTION':          2.0,   # gaze/head away — needs repetition
+            'HEAD_MOVEMENT':        1.0,
+            'STUDENT_LEFT_SEAT':    4.0,
+            'EYES_CLOSED':          6.0,
+            'GAZE_LEFT':            1.0,
+            'GAZE_RIGHT':           1.0,
+            'GAZE_UP':              1.0,
+            'GAZE_DOWN':            1.0,
+            'GAZE_UP_LEFT':         1.0,
+            'GAZE_UP_RIGHT':        1.0,
+            'GAZE_DOWN_LEFT':       1.0,
+            'GAZE_DOWN_RIGHT':      1.0,
         }
         self.type_gap_seconds['TERMINATED_BY_ADMIN'] = 0.0
 

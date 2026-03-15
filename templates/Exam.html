@@ -2128,11 +2128,12 @@
         // TIMER FUNCTIONS
         // ============================================
         function startTimer() {
-            const endAt = Date.now() + (EXAM_DURATION_SECONDS * 1000);
+            // Derive countdown from the current timeLeft so we can restart cleanly on re-attempts.
+            const endAt = Date.now() + (Math.max(1, timeLeft) * 1000);
             if (timerInterval) clearInterval(timerInterval);
             const tick = () => {
                 const remainingMs = Math.max(0, endAt - Date.now());
-                timeLeft = Math.max(0, Math.floor(remainingMs / 1000));
+                timeLeft = Math.max(0, Math.round(remainingMs / 1000));
                 updateTimerDisplay();
                 if (timeLeft <= 0) {
                     clearInterval(timerInterval);
@@ -2255,10 +2256,13 @@
             gazeDirection: null,
             gazeDirectionFrames: 0,
             gazeDirectionSince: 0,
+            headMotionStreak: 0,
+            prevHeadYaw: null,
+            prevHeadPitch: null,
             syncTimer: null,
             lastServerViolationSignature: '',
-            globalWarningGapMs: 1500,        // Faster warnings (1-2s)
-            postAcknowledgeGraceMs: 3000,    // 3s pause after "I understand"
+            globalWarningGapMs: 900,         // Faster warnings (sub‑second cadence)
+            postAcknowledgeGraceMs: 1800,    // Shorter pause after "I understand"
             duplicateKeyWindowMs: 4000,
             typeCooldownsMs: {
                 'VOICE_DETECTED': 4000,
@@ -2276,11 +2280,11 @@
                 'DEVTOOLS_SHORTCUT': 4000,
                 'KEYBOARD_SHORTCUT': 4000,
                 'GAZE_AWAY': 4000,
-                'NOT_FORWARD': 4000,
-                'NO_FACE': 4000,
-                'FACE_OBSCURED': 5000,
-                'PROHIBITED_OBJECT': 1200,
-                'DISTRACTION': 2000,
+                'NOT_FORWARD': 3000,
+                'NO_FACE': 3000,
+                'FACE_OBSCURED': 3200,
+                'PROHIBITED_OBJECT': 900,
+                'DISTRACTION': 1800,
                 'GAZE_LEFT': 4000,
                 'GAZE_RIGHT': 4000,
                 'GAZE_UP': 4000,
@@ -2314,11 +2318,14 @@
                 try {
                     this.socket = io('/student', {
                         transports: ['websocket', 'polling'],
-                        reconnectionDelayMax: 10000
+                        reconnection: true,
+                        reconnectionAttempts: Infinity,
+                        reconnectionDelay: 800,
+                        reconnectionDelayMax: 4000,
+                        timeout: 20000,
+                        withCredentials: true,
+                        query: { student_id: String(studentId || '') },
                     });
-                    this.socket.on('connect', () => console.log('Connected to exam monitoring'));
-                    this.socket.on('student_violation', (data) => this.addWarning(data));
-                    this.socket.on('warnings_cleared', () => this.clearWarnings());
                     
                     // Phase 13: Enhanced Admin Notification
                     this.socket.on('admin_notification', (data) => {
@@ -2730,30 +2737,46 @@
                 const pitch = Number.isFinite(pitchDeg) ? pitchDeg : 0;
                 const headYaw = Number.isFinite(headYawDeg) ? headYawDeg : 0;
 
-                // Assumed thresholds (center, hard left/right, diagonals)
-                const CENTER_YAW = 12;
-                const CENTER_PITCH = 18;
-                const HARD_YAW = 24;
-                const HEAD_YAW = 18;
+                // Tight thresholds — fire quickly for meaningful head/eye drift.
+                const CENTER_YAW = 5;
+                const CENTER_PITCH = 7;
+                const HARD_YAW = 10;
+                const HARD_PITCH = 10;
+                const HEAD_YAW = 6;
 
                 if (Math.abs(yaw) <= CENTER_YAW && Math.abs(pitch) <= CENTER_PITCH) {
                     return { code: 'CENTER', flag: null, label: 'Center' };
                 }
 
-                const left = yaw <= -HARD_YAW && headYaw <= -HEAD_YAW;
-                const right = yaw >= HARD_YAW && headYaw >= HEAD_YAW;
+                const left = yaw <= -HARD_YAW || headYaw <= -HEAD_YAW;
+                const right = yaw >= HARD_YAW || headYaw >= HEAD_YAW;
+                const up = pitch >= HARD_PITCH;
+                const down = pitch <= -HARD_PITCH;
+
+                if (left && up) return { code: 'UP_LEFT', flag: 'GAZE_UP_LEFT', label: 'Up-left' };
+                if (right && up) return { code: 'UP_RIGHT', flag: 'GAZE_UP_RIGHT', label: 'Up-right' };
+                if (left && down) return { code: 'DOWN_LEFT', flag: 'GAZE_DOWN_LEFT', label: 'Down-left' };
+                if (right && down) return { code: 'DOWN_RIGHT', flag: 'GAZE_DOWN_RIGHT', label: 'Down-right' };
                 if (left) return { code: 'HARD_LEFT', flag: 'GAZE_LEFT', label: 'Hard left' };
                 if (right) return { code: 'HARD_RIGHT', flag: 'GAZE_RIGHT', label: 'Hard right' };
+                if (up) return { code: 'UP', flag: 'GAZE_UP', label: 'Looking up' };
+                if (down) return { code: 'DOWN', flag: 'GAZE_DOWN', label: 'Looking down' };
 
                 return { code: 'CENTER', flag: null, label: 'Center' };
             },
 
             gazeBannerForFlag(flag) {
                 const map = {
-                    'GAZE_LEFT': 'Distraction: Eyes too far left',
-                    'GAZE_RIGHT': 'Distraction: Eyes too far right'
+                    'GAZE_LEFT': 'Please look at the screen (looking left)',
+                    'GAZE_RIGHT': 'Please look at the screen (looking right)',
+                    'GAZE_UP': 'Eyes going above the screen - refocus on exam',
+                    'GAZE_DOWN': 'Eyes going below the screen - refocus on exam',
+                    'GAZE_UP_LEFT': 'Looking away (up-left)',
+                    'GAZE_UP_RIGHT': 'Looking away (up-right)',
+                    'GAZE_DOWN_LEFT': 'Looking away (down-left)',
+                    'GAZE_DOWN_RIGHT': 'Looking away (down-right)'
                 };
-                return map[flag] || 'Distraction: Eyes looking away from screen';
+                return map[flag] || 'Please look at the screen';
             },
 
             terminateExam(reason, opts = {}) {
@@ -3192,32 +3215,33 @@
                     const bannerTextEl = document.getElementById('warning-banner-text');
                     if (bannerEl && bannerTextEl) {
                         const flagsArr = a.active_flags ? Array.from(a.active_flags) : [];
-                        const accessory = m.accessory || {};
-                        const baseBanned = m.banned_labels ? Array.from(m.banned_labels) : [];
-                        const hasAccessory = Boolean(accessory.earphone_detected || accessory.headphone_detected);
-                        if (hasAccessory && !baseBanned.includes('headphones')) baseBanned.push('headphones');
+                        const allowedBanned = ['cell phone', 'clock', 'book', 'paper', 'smartwatch', 'phone'];
+                        const baseBanned = (m.banned_labels ? Array.from(m.banned_labels) : [])
+                            .map(l => String(l || '').toLowerCase())
+                            .filter(l => allowedBanned.includes(l));
                         const banned = baseBanned.length ? Array.from(new Set(baseBanned.map(l => {
-                            if (l === 'cell phone') return 'Cell Phone';
+                            if (l === 'cell phone' || l === 'phone') return 'Cell Phone';
+                            if (l === 'clock' || l === 'smartwatch') return 'Smartwatch';
                             if (l === 'book') return 'Book/Paper';
-                            if (l === 'clock') return 'Smartwatch';
-                            if (['headphone', 'headphones', 'headset', 'earphone', 'earphones', 'earbud', 'earbuds'].includes(l)) return 'Headphones';
+                            if (l === 'paper') return 'Paper';
                             return l;
-                        }).map(label => {
-                            if (label === 'Cell Phone' && hasAccessory && baseBanned.length === 1) return 'Headphones';
-                            return label;
                         }))) : [];
                         
-                        // ── Gaze Direction Tracking ──
-                        const gazeDir = warningSystem.classifyGazeDirection(m.gaze_yaw_deg, m.gaze_pitch_deg, m.yaw_deg);
+                        // ── Gaze & Head Pose Tracking ──
+                        const hasFace = Number(m.face_count || 0) > 0;
+                        const gazeDir = hasFace ? warningSystem.classifyGazeDirection(m.gaze_yaw_deg, m.gaze_pitch_deg, m.yaw_deg) : null;
                         const nowTs = Date.now();
-                        if (gazeDir && gazeDir.code !== 'CENTER') {
+                        if (hasFace && gazeDir && gazeDir.code !== 'CENTER') {
                             if (warningSystem.gazeDirection !== gazeDir.code) {
                                 warningSystem.gazeDirection = gazeDir.code;
                                 warningSystem.gazeDirectionSince = nowTs;
-                                warningSystem.gazeDirectionFrames = 0;
+                                warningSystem.gazeDirectionFrames = 1;
+                            } else {
+                                warningSystem.gazeDirectionFrames += 1;
                             }
                             const heldMs = nowTs - (warningSystem.gazeDirectionSince || nowTs);
-                            if (heldMs >= 3000 && gazeDir.flag) {
+                            // Stricter: ~0.7s persistence and at least 2 frames
+                            if (heldMs >= 700 && warningSystem.gazeDirectionFrames >= 2 && gazeDir.flag) {
                                 if (!flagsArr.includes(gazeDir.flag)) flagsArr.push(gazeDir.flag);
                             }
                         } else {
@@ -3226,8 +3250,22 @@
                             warningSystem.gazeDirectionFrames = 0;
                         }
 
-                        // ── Pose Tracking (disabled to reduce false positives) ──
-                        warningSystem.badPoseFrames = 0;
+                        // ── Head movement jitter detection ──
+                        const headYaw = Number(m.yaw_deg || 0);
+                        const headPitch = Number(m.pitch_deg || 0);
+                        const yawDelta = Math.abs(headYaw - (warningSystem.prevHeadYaw ?? headYaw));
+                        const pitchDelta = Math.abs(headPitch - (warningSystem.prevHeadPitch ?? headPitch));
+                        const headMoving = yawDelta > 12 || pitchDelta > 10;
+                        warningSystem.prevHeadYaw = headYaw;
+                        warningSystem.prevHeadPitch = headPitch;
+                        if (headMoving) {
+                            warningSystem.headMotionStreak = Math.min((warningSystem.headMotionStreak || 0) + 1, 12);
+                        } else {
+                            warningSystem.headMotionStreak = Math.max((warningSystem.headMotionStreak || 0) - 1, 0);
+                        }
+                        if (warningSystem.headMotionStreak >= 3 && !flagsArr.includes('HEAD_MOVEMENT')) {
+                            flagsArr.push('HEAD_MOVEMENT');
+                        }
 
                         // ── Face Obscured Tracking (burqa/cover) ──
                         const lightingOk = Number(m.lighting_score || 0) >= 0.35;
@@ -3274,6 +3312,9 @@
                         } else if (flagsArr.includes('NO_FACE')) {
                             bannerMsg = "Warning: No face detected!";
                             bannerActive = true;
+                        } else if (flagsArr.includes('HEAD_MOVEMENT')) {
+                            bannerMsg = "Warning: Keep your head still and face the screen";
+                            bannerActive = true;
                         } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 3000)) {
                             bannerMsg = "Warning: Human voice detected in room";
                             bannerActive = true;
@@ -3311,7 +3352,9 @@
                                     warningSystem.noFaceFrames = 0;
                                 } else if (flagsArr.includes('NOT_FORWARD')) {
                                     warningSystem.addWarning({ type: 'DISTRACTION', details: 'Please look directly at the exam screen', severity: 'medium', student_id: studentId });
-                                    warningSystem.badPoseFrames = 0;
+                                } else if (flagsArr.includes('HEAD_MOVEMENT')) {
+                                    warningSystem.addWarning({ type: 'HEAD_MOVEMENT', details: 'Excessive head movement detected', severity: 'medium', student_id: studentId });
+                                    warningSystem.headMotionStreak = 0;
                                 } else if (activeGazeFlag) {
                                     warningSystem.addWarning({ type: 'DISTRACTION', details: warningSystem.gazeBannerForFlag(activeGazeFlag).replace('Warning: ', ''), severity: 'medium', student_id: studentId });
                                     warningSystem.gazeDirection = null;
@@ -3547,12 +3590,12 @@
                             });
                         }
 
-                        // Send live frame + telemetry via socket for admin (~12 FPS)
-                        if (!this.inFlightPost && ((nowTs - (this.lastPostAt || 0)) >= 83)) {
+                        // Send live frame + telemetry via socket for admin (~2.5 FPS, lighter payload)
+                        if (!this.inFlightPost && ((nowTs - (this.lastPostAt || 0)) >= 400)) {
                             this.inFlightPost = true;
                             this.lastPostAt = nowTs;
                             try {
-                                const frameB64 = this.canvas.toDataURL('image/jpeg', 0.40).split(',')[1];
+                                const frameB64 = this.canvas.toDataURL('image/jpeg', 0.25).split(',')[1];
                                 if (typeof warningSystem !== 'undefined' && warningSystem.socket && typeof studentId !== 'undefined') {
                                     warningSystem.socket.emit('student_live_frame', {
                                         student_id: studentId,
@@ -3903,6 +3946,7 @@
             uploadDone: false,
             mimeType: 'video/webm',
             stopPromise: null,
+            fallbackAudioStream: null,
 
             async start() {
                 if (this.started) return true;
@@ -3915,21 +3959,37 @@
                     console.log('Session recorder skipped: video track unavailable');
                     return false;
                 }
-                const captureFps = 15;
                 const canvasStream = new MediaStream([track]);
                 const videoTrack = canvasStream.getVideoTracks()[0];
-                const audioTrack = voiceMonitor.stream && voiceMonitor.stream.getAudioTracks
+                let audioTrack = voiceMonitor.stream && voiceMonitor.stream.getAudioTracks
                     ? voiceMonitor.stream.getAudioTracks()[0]
                     : null;
+                if ((!audioTrack || audioTrack.readyState !== 'live') && remoteFrameUploader.stream && remoteFrameUploader.stream.getAudioTracks) {
+                    audioTrack = remoteFrameUploader.stream.getAudioTracks()[0] || audioTrack;
+                }
+                if ((!audioTrack || audioTrack.readyState !== 'live') && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    try {
+                        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                        this.fallbackAudioStream = micStream;
+                        audioTrack = micStream.getAudioTracks()[0] || audioTrack;
+                    } catch (err) {
+                        console.log('Session recorder mic fallback failed:', err);
+                    }
+                }
                 if (!videoTrack || videoTrack.readyState !== 'live') {
                     console.log('Session recorder skipped: no live video track');
                     return false;
                 }
                 try {
                     const AudioCtx = window.AudioContext || window.webkitAudioContext;
-                    this.context = new AudioCtx();
-                    this.audioTrack = audioTrack;
-                    
+                    if (audioTrack) {
+                        this.context = new AudioCtx();
+                        this.audioTrack = audioTrack;
+                    } else {
+                        this.context = null;
+                        this.audioTrack = null;
+                    }
+
                     const tracks = [videoTrack.clone ? videoTrack.clone() : videoTrack];
                     // 4) Add raw PCM streaming to server for tampering-proof voice detection
                     if (this.context && this.audioTrack && this.audioTrack.readyState === 'live') {
@@ -4062,11 +4122,24 @@
                 if (this.stream) {
                     try { this.stream.getTracks().forEach(track => track.stop()); } catch (_) { }
                 }
+                if (this.fallbackAudioStream) {
+                    try { this.fallbackAudioStream.getTracks().forEach(track => track.stop()); } catch (_) { }
+                }
                 this.stream = null;
+                this.fallbackAudioStream = null;
                 this.mediaRecorder = null;
                 this.started = false;
             }
         };
+
+        window.addEventListener('beforeunload', () => {
+            if (typeof sessionRecorder !== 'undefined' && sessionRecorder.stop) {
+                try { sessionRecorder.stop(); } catch (_) { }
+            }
+            if (typeof voiceMonitor !== 'undefined' && voiceMonitor.stop) {
+                try { voiceMonitor.stop(); } catch (_) { }
+            }
+        });
 
         document.addEventListener('DOMContentLoaded', () => {
             warningSystem.init();
@@ -4074,9 +4147,9 @@
             window.startMonitoring = () => {
                 warningSystem.startFullscreenDetection();
             };
-            // Delay camera/detection start slightly (2s) to avoid premature warnings at exam load.
+            // Short grace on load to avoid false positives; keep under 1s for snappier alerts.
             setTimeout(() => {
-                warningSystem.acknowledgeGraceUntil = Date.now() + 2000;
+                warningSystem.acknowledgeGraceUntil = Date.now() + 1000;
             }, 0);
 
             // Initialize WASM Engine early and configure SocketIO reporting

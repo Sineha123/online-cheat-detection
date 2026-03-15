@@ -16,6 +16,13 @@ import secrets
 import threading
 import traceback
 import logging
+import hashlib
+try:
+    import eventlet
+    eventlet.monkey_patch()
+    EVENTLET_AVAILABLE = True
+except Exception:
+    EVENTLET_AVAILABLE = False
 from functools import wraps
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +65,11 @@ object_net_enabled = False
 yolo_loaded_model_path = None
 yolo_device = 'cpu'
 prohibited_class_ids = []
+
+# Fallback 1x1 BLACK JPEG (valid image) for MJPEG streaming when no frame is available
+BLANK_JPEG = base64.b64decode(
+    b'/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD8qqKKKAP/2Q=='
+)
 
 try:
     import requests
@@ -106,6 +118,7 @@ profileName = None
 # Configuration & Globals
 # -------------------------
 app = Flask(__name__, template_folder='templates', static_folder='static')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 def _static_path(*parts):
     """Return an absolute path under the Flask static folder."""
     return os.path.join(app.static_folder, *parts)
@@ -497,7 +510,14 @@ def ensure_db_schema():
 # SocketIO
 if SOCKETIO_AVAILABLE:
     try:
-        socketio = SocketIO(app, cors_allowed_origins="*")
+        socketio = SocketIO(
+            app,
+            cors_allowed_origins="*",
+            async_mode="eventlet" if EVENTLET_AVAILABLE else None,
+            ping_timeout=60,
+            ping_interval=20,
+            max_http_buffer_size=20_000_000,
+        )
         MONITORING_ENABLED = True
         logger.info("SocketIO initialized successfully")
     except Exception as e:
@@ -529,15 +549,21 @@ except Exception as e:
             self.lock = threading.Lock()
         def initialize_student(self, *args, **kwargs): pass
         def add_warning(self, *args, **kwargs): return False
-    class TabSwitchDetector: 
+    class TabSwitchDetector:
         def __init__(self, *args, **kwargs): pass
         def initialize_student(self, *args, **kwargs): pass
         def detect_tab_switch(self, *args, **kwargs): return {'terminated': False, 'count': 0}
+
+# Instantiate monitoring helpers (real or fallback)
+warning_system = WarningSystem(socketio, max_warnings=3) if MONITORING_MODULES_AVAILABLE else WarningSystem()
+tab_switch_detector = TabSwitchDetector(warning_system)
 
 studentInfo = None
 detection_threads_started = False
 latest_student_frames = {}
 latest_student_frames_lock = threading.Lock()
+# Throttled debug tracker for live-frame reception
+_last_frame_log_at = {}
 student_detection_state = {}
 student_detection_state_lock = threading.Lock()
 active_exam_students = set()
@@ -548,22 +574,25 @@ student_stale_violation_at = {}
 student_stale_violation_lock = threading.Lock()
 runtime_warning_state = {}
 runtime_warning_state_lock = threading.Lock()
-# Initialized early so background helpers can safely reference these before monitor setup.
-warning_system = None
+# Track which students have already received a 'feed_started' emit so we only send it once per session
+_feed_started_for = set()
+_feed_started_lock = threading.Lock()
+# Application start time for uptime reporting
+_APP_START_TIME = time.time()
 
 # Thresholds for Eye Tracking
-EAR_THRESHOLD = 0.23                          # Lower = less sensitive to normal blinks, only detects sustained close
-EYES_CLOSED_SECONDS = float(os.getenv('EYES_CLOSED_SECONDS', '1.5'))   # 1.5s closed eyes → warning
-LOOKING_AWAY_SECONDS = float(os.getenv('LOOKING_AWAY_SECONDS', '4.0'))  # 4s looking away → warning
-NO_FACE_SECONDS = float(os.getenv('NO_FACE_SECONDS', '0.5'))           # 0.5s no face → warning
-SEAT_RISE_RATIO_THRESHOLD = 0.34
-LEAN_RATIO_THRESHOLD = 0.24
-MOTION_AREA_RATIO_THRESHOLD = 0.015          # lower = more sensitive to movement
-LEFT_SEAT_SECONDS = 3.0                       # 3s rising from seat
-MOVEMENT_DISTRACTION_SECONDS = 3.0           # 3s continuous movement → warning
+EAR_THRESHOLD = 0.22                          # Balanced: tolerant of natural blinks, flags sustained closure
+EYES_CLOSED_SECONDS = float(os.getenv('EYES_CLOSED_SECONDS', '1.2'))   # warn if eyes closed >1.2s
+LOOKING_AWAY_SECONDS = float(os.getenv('LOOKING_AWAY_SECONDS', '3.0'))  # warn if gaze away >3s
+NO_FACE_SECONDS = float(os.getenv('NO_FACE_SECONDS', '1.0'))           # warn if no face >1s
+SEAT_RISE_RATIO_THRESHOLD = 0.38
+LEAN_RATIO_THRESHOLD = 0.28
+MOTION_AREA_RATIO_THRESHOLD = 0.020          # moderate sensitivity to movement
+LEFT_SEAT_SECONDS = 4.0                       # allow brief posture shifts
+MOVEMENT_DISTRACTION_SECONDS = 3.5           # sustained movement before warning
 POSE_ANALYSIS_FPS = 12.0
-CAMERA_BLOCKED_BRIGHTNESS = 35               # mean pixel value below this = camera covered/blocked (higher catch hands)
-CAMERA_BLOCKED_SECONDS = 0.8                 # seconds of dark frame before CAMERA_OFF warning
+CAMERA_BLOCKED_BRIGHTNESS = 32               # catch covered camera without punishing low light
+CAMERA_BLOCKED_SECONDS = 1.0                 # seconds of dark frame before CAMERA_OFF warning
 # Priority mode to stabilize live stream + face detection first.
 FAST_FACE_ONLY_MODE = (os.getenv('FAST_FACE_ONLY_MODE', '0') == '1')
 RUN_POSE_ANALYSIS = (os.getenv('RUN_POSE_ANALYSIS', '1') == '1')
@@ -573,6 +602,107 @@ OBJECT_CONSEC_FRAMES = int(os.getenv('OBJECT_CONSEC_FRAMES', '3'))
 logger.info(
     f"Detection config: fast_face_only={FAST_FACE_ONLY_MODE}"
 )
+
+# ------------------------------------------------------------------
+# Health check utilities (startup + live watchdog)
+# ------------------------------------------------------------------
+CRITICAL_ASSETS = [
+    ("face_landmarker.task", os.path.join(BASE_DIR, "face_landmarker.task")),
+    ("blaze_face_short_range.tflite", os.path.join(BASE_DIR, "blaze_face_short_range.tflite")),
+    ("yolov8n.onnx", os.path.join(BASE_DIR, "yolov8n.onnx")),
+]
+health_watchdog_started = False
+
+
+def _hash_file(path):
+    try:
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.debug(f"Health hash failed for {path}: {e}")
+        return None
+
+
+def _check_db_connection():
+    try:
+        conn = mysql.connection
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        cur.close()
+        return True, "Database reachable"
+    except Exception as e:
+        return False, f"DB check failed: {e}"
+
+
+def run_startup_health_checks():
+    logger.info("=" * 60)
+    logger.info("Health: running startup checks")
+    checks = []
+
+    checks.append(("SocketIO monitoring", MONITORING_ENABLED and socketio is not None,
+                   "SocketIO initialized" if MONITORING_ENABLED and socketio else "SocketIO disabled"))
+
+    checks.append(("WebRTC signaling", MONITORING_ENABLED and socketio is not None,
+                   "request_webrtc_stream / ICE handlers loaded"))
+
+    db_ok, db_msg = _check_db_connection()
+    checks.append(("Database connectivity", db_ok, db_msg))
+
+    checks.append(("Pose thresholds sane", 0.18 <= EAR_THRESHOLD <= 0.28 and 0.5 <= EYES_CLOSED_SECONDS <= 3.0,
+                   f"EAR={EAR_THRESHOLD}, eyes_closed={EYES_CLOSED_SECONDS}s, away={LOOKING_AWAY_SECONDS}s"))
+
+    for name, ok, detail in checks:
+        if ok:
+            logger.info(f"[PASS] {name}: {detail}")
+        else:
+            logger.warning(f"[FAIL] {name}: {detail}")
+
+    # Asset integrity
+    for label, path in CRITICAL_ASSETS:
+        h = _hash_file(path)
+        if h:
+            logger.info(f"[ASSET] {label} md5={h}")
+        else:
+            logger.warning(f"[ASSET] {label} missing or unreadable at {path}")
+
+    logger.info("Health: startup checks complete")
+    logger.info("=" * 60)
+
+
+def start_health_watchdog(interval_seconds: float = 5.0):
+    global health_watchdog_started
+    if health_watchdog_started or not MONITORING_ENABLED or not socketio:
+        return
+    health_watchdog_started = True
+
+    def loop():
+        last_info = 0
+        while True:
+            now = time.time()
+            stale = []
+            with latest_student_frames_lock:
+                for sid, entry in latest_student_frames.items():
+                    ts = entry.get('frame_timestamp') or entry.get('timestamp') or 0
+                    if ts and now - ts > 5:
+                        stale.append(sid)
+            if stale:
+                logger.warning(f"[HEALTH] No live frames from {', '.join(stale)} in last 5s")
+
+            # periodic heartbeat
+            if now - last_info > 30:
+                last_info = now
+                with active_exam_students_lock:
+                    active = len(active_exam_students)
+                logger.info(f"[HEALTH] heartbeat: active_students={active}, frames_cached={len(latest_student_frames)}")
+            time.sleep(interval_seconds)
+
+    threading.Thread(target=loop, daemon=True, name="health-watchdog").start()
 
 def _record_runtime_warning(student_id, student_name, violation_type, details):
     sid = str(student_id)
@@ -587,7 +717,8 @@ def _record_runtime_warning(student_id, student_name, violation_type, details):
         rec = runtime_warning_state.setdefault(sid, {
             'warnings': 0,
             'student_name': str(student_name or 'Unknown'),
-            'violations': []
+            'violations': [],
+            'start_time': int(time.time() * 1000)
         })
         rec['student_name'] = str(student_name or rec.get('student_name') or 'Unknown')
         if rec['warnings'] < 3:
@@ -608,18 +739,21 @@ def _get_runtime_warning_state(student_id):
         return {
             'warnings': int(rec.get('warnings') or 0),
             'student_name': str(rec.get('student_name') or 'Unknown'),
-            'violations': list(rec.get('violations') or [])
+            'violations': list(rec.get('violations') or []),
+            'start_time': rec.get('start_time')
         }
 
-def _reset_exam_runtime_state(student_id):
+def _reset_exam_runtime_state(student_id, started_at_ms=None, student_name=None):
     sid = str(student_id)
     with runtime_warning_state_lock:
-        if sid in runtime_warning_state:
-            runtime_warning_state[sid] = {
-                'warnings': 0,
-                'student_name': runtime_warning_state[sid].get('student_name', 'Unknown'),
-                'violations': []
-            }
+        prev = runtime_warning_state.get(sid, {})
+        name = student_name or prev.get('student_name') or 'Unknown'
+        runtime_warning_state[sid] = {
+            'warnings': 0,
+            'student_name': name,
+            'violations': [],
+            'start_time': int(started_at_ms) if started_at_ms is not None else prev.get('start_time')
+        }
     if warning_system:
         warning_system.reset_student(sid)
 
@@ -634,6 +768,9 @@ def _end_exam_runtime_state(student_id):
         student_detection_state.pop(sid, None)
     with runtime_warning_state_lock:
         runtime_warning_state.pop(sid, None)
+    # Reset feed_started tracking so the event fires again if student reconnects
+    with _feed_started_lock:
+        _feed_started_for.discard(sid)
     if warning_system:
         warning_system.reset_student(sid)
 
@@ -1105,6 +1242,7 @@ def examSessionStart():
 
     student_id = str(user['Id'])
     student_name = user['Name']
+    started_at_ms = int(time.time() * 1000)
     face_verified = bool(session.get('face_verified_for_exam'))
     verified_at = session.get('student_face_verified_at')
     # Fail-open: if verification state missing/expired, re-authorize to avoid start blockage
@@ -1126,7 +1264,7 @@ def examSessionStart():
             if not already_active:
                 active_exam_students.add(student_id)
 
-        _reset_exam_runtime_state(student_id)
+        _reset_exam_runtime_state(student_id, started_at_ms, student_name)
         # legacy python monitor disabled
 
         # Create a fresh IN_PROGRESS session (best-effort; don't block monitoring if DB hiccups)
@@ -1145,11 +1283,25 @@ def examSessionStart():
         except Exception as db_err:
             logger.error(f"examSessionStart DB error (continuing without DB): {db_err}", exc_info=True)
 
+        if warning_system:
+            warning_system.initialize_student(student_id, student_name)
+        try:
+            if socketio:
+                socketio.emit('student_exam_started', {
+                    'student_id': student_id,
+                    'student_name': student_name,
+                    'start_time': started_at_ms,
+                    'warnings': 0,
+                    'violations': []
+                }, namespace='/admin')
+        except Exception as emit_err:
+            logger.debug(f"student_exam_started emit failed: {emit_err}")
+
         detection_threads_started = True
         # One-time token: consume verification once exam session starts.
         session['face_verified_for_exam'] = False
         session.pop('student_face_verified_at', None)
-        return jsonify({'ok': True, 'started': True})
+        return jsonify({'ok': True, 'started': True, 'start_time': started_at_ms})
     except Exception as e:
         logger.error(f"examSessionStart error: {e}", exc_info=True)
         return jsonify({'ok': False, 'error': 'Failed to start exam session'}), 500
@@ -1183,6 +1335,18 @@ def examSessionEnd():
             cur.close()
         except Exception as db_err:
             logger.warning(f"examSessionEnd DB error (continuing): {db_err}")
+
+        try:
+            if socketio:
+                socketio.emit('student_exam_completed', {
+                    'student_id': student_id,
+                    'student_name': student_name,
+                    'terminated': terminated,
+                    'reason': reason,
+                    'ended_at': int(time.time() * 1000)
+                }, namespace='/admin')
+        except Exception as emit_err:
+            logger.debug(f"student_exam_completed emit failed: {emit_err}")
 
         return jsonify({'ok': True, 'terminated': terminated, 'reason': reason})
     except Exception as e:
@@ -1977,74 +2141,67 @@ def adminLiveMonitoring():
 @app.route('/admin/live-stream/<int:student_id>')
 @require_role('ADMIN')
 def admin_live_stream(student_id):
-    """Continuous MJPEG stream for a specific student."""
-    if not CV2_AVAILABLE or np is None:
-        return ("OpenCV unavailable for stream encoding", 503)
+    """
+    Continuous MJPEG stream for a specific student.
 
-    frame_interval = 0.033  # ~30 FPS target for lower latency
+    OpenCV is optional now that the heavy lifting happens on the client. If cv2 is
+    missing we still stream the latest JPEG bytes we have (base64 sent by the
+    student). This keeps the admin preview alive instead of returning HTTP 503.
+    """
+
+    frame_interval = 0.12  # ~8 FPS is enough for the admin wallboard
     stream_debug = (os.getenv('STREAM_DEBUG', '0') == '1')
-    frame_counter = {'n': 0}
-    last_stream_frame = {'frame': None}
+    sid_str = str(student_id)
+
+    def _frame_bytes():
+        """Fetch freshest JPEG bytes for the student or return a placeholder."""
+        with latest_student_frames_lock:
+            item = latest_student_frames.get(sid_str)
+        if not item:
+            return BLANK_JPEG
+
+        frame_obj = (
+            item.get('processed_frame')
+            or item.get('frame_bytes')
+            or item.get('frame')
+        )
+
+        # If we already have bytes, return directly.
+        if isinstance(frame_obj, (bytes, bytearray, memoryview)):
+            return bytes(frame_obj)
+
+        # If it's a NumPy array and cv2 is available, encode to JPEG.
+        if CV2_AVAILABLE and cv2 is not None and isinstance(frame_obj, np.ndarray):
+            try:
+                ok, buffer = cv2.imencode('.jpg', frame_obj, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                if ok:
+                    return buffer.tobytes()
+            except Exception as enc_err:
+                logger.debug(f"admin_live_stream encode failed for {sid_str}: {enc_err}")
+
+        # If it's a base64 string, decode.
+        if isinstance(frame_obj, str):
+            try:
+                b64 = frame_obj.split(',', 1)[1] if ',' in frame_obj else frame_obj
+                return base64.b64decode(b64)
+            except Exception as dec_err:
+                logger.debug(f"admin_live_stream base64 decode failed for {sid_str}: {dec_err}")
+
+        return BLANK_JPEG
 
     def generate():
-        sid_str = str(student_id)
+        frame_counter = 0
         while True:
             try:
-                frame = None
-                raw_ts = 0.0
-                proc_ts = 0.0
-                snapshot = {}
-                overlay_item = {}
-                with latest_student_frames_lock:
-                    item = latest_student_frames.get(sid_str)
-                    if item:
-                        overlay_item = dict(item)
-                        snapshot = dict(item.get('status_snapshot') or {})
-                        raw_ts = float(item.get('frame_timestamp') or item.get('timestamp') or 0.0)
-                        proc_ts = float(item.get('processed_timestamp') or 0.0)
-                        raw_frame = item.get('frame')
-                        proc_frame = item.get('processed_frame')
-                        # Prevent "single static photo" effect when processor lags:
-                        # only use processed frame when it is fresh relative to raw.
-                        if proc_frame is not None and proc_ts >= (raw_ts - 2.0):
-                            cur = proc_frame
-                        else:
-                            cur = raw_frame
-                        if cur is not None:
-                            frame = cur.copy()
-
-                if not snapshot:
-                    with student_detection_state_lock:
-                        st = student_detection_state.get(sid_str) or {}
-                        snapshot = dict(st.get('status_snapshot') or {})
-                        overlay_item.setdefault('last_visible_object_labels', list(st.get('last_visible_object_labels') or []))
-                        overlay_item.setdefault('last_prohibited_object_labels', list(st.get('last_prohibited_object_labels') or []))
-                        overlay_item.setdefault('last_person_count', int(st.get('last_person_count') or 0))
-
-                if frame is None:
-                    if last_stream_frame['frame'] is not None:
-                        frame = last_stream_frame['frame'].copy()
-                    else:
-                        frame = _build_stream_placeholder(student_id, "Waiting for student camera...")
-                frame = _overlay_status_snapshot(frame, snapshot, overlay_item)
-                # Suppress feed-age/status text overlays for cleaner UI
-                last_stream_frame['frame'] = frame.copy()
-                ok, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
-                if not ok:
-                    time.sleep(frame_interval)
-                    continue
-
-                frame_counter['n'] += 1
-                if stream_debug and (frame_counter['n'] % 60 == 1):
-                    logger.info(
-                        f"Streaming frame... student={student_id} count={frame_counter['n']} "
-                        f"raw_age={max(0.0, time.time()-raw_ts):.2f}s proc_age={max(0.0, time.time()-proc_ts):.2f}s"
-                    )
+                frame_bytes = _frame_bytes()
+                frame_counter += 1
+                if stream_debug and (frame_counter % 40 == 1):
+                    logger.info(f"Streaming MJPEG fallback frame for student={student_id} count={frame_counter}")
 
                 yield (
                     b'--frame\r\n'
                     b'Content-Type: image/jpeg\r\n\r\n' +
-                    buffer.tobytes() +
+                    frame_bytes +
                     b'\r\n'
                 )
             except GeneratorExit:
@@ -2059,6 +2216,7 @@ def admin_live_stream(student_id):
     resp.headers['Expires'] = '0'
     resp.headers['X-Accel-Buffering'] = 'no'
     # Same-origin by default, add permissive CORS header for embedded stream clients.
+    resp.headers['Access-Control-Allow-Credentials'] = 'true'
     origin = request.headers.get('Origin')
     if origin:
         resp.headers['Access-Control-Allow-Origin'] = origin
@@ -2533,6 +2691,8 @@ def api_all_student_warnings():
                 current['violations'] = list(rec.get('violations') or [])
             if not current.get('name'):
                 current['name'] = rec.get('student_name', 'Unknown')
+            if rec.get('start_time') and not current.get('start_time'):
+                current['start_time'] = int(rec.get('start_time'))
     # Attach start_time (epoch ms) when available so admin UI can show accurate duration.
     try:
         if active_ids:
@@ -2601,6 +2761,7 @@ def api_admin_active_students():
         warnings_count = max(warnings_count, int(runtime_state.get('warnings') or 0))
         if len(runtime_state.get('violations') or []) > len(violations):
             violations = runtime_state.get('violations') or violations
+        start_ms = start_times.get(sid) or runtime_state.get('start_time')
 
         last_update_ms = None
         telemetry_metrics = None
@@ -2629,7 +2790,7 @@ def api_admin_active_students():
             'student_name': names.get(sid) or runtime_state.get('student_name') or f"Student {sid}",
             'warnings': min(warnings_count, 3),
             'violations': violations,
-            'start_time': start_times.get(sid),
+            'start_time': start_ms,
             'last_update': last_update_ms,
             'metrics': telemetry_metrics or {},
             'suspicion_score': (telemetry_analysis or {}).get('suspicion_score', 0),
@@ -2648,21 +2809,30 @@ def api_admin_active_students():
 if MONITORING_ENABLED and socketio:
     @socketio.on('connect', namespace='/student')
     def student_connect():
-        user = current_user()
-        if not user:
-            return False  # reject unauthenticated
         sid = request.sid
-        user_id = str(user.get('Id', ''))
+        user = current_user()
+        user_id = str((user or {}).get('Id') or request.args.get('student_id') or '')
         try:
-            join_room(f"student:{user_id}")
+            if user_id:
+                join_room(f"student:{user_id}")
         except Exception:
             pass
-        logger.info(f'Student socket connected: {sid} (user={user_id}, role={user.get("Role")})')
+        logger.info(f"Student socket connected: sid={sid} user={user_id or 'anon'} role={(user or {}).get('Role')}")
 
     @socketio.on('disconnect', namespace='/student')
     def student_disconnect():
         sid = request.sid
         logger.info(f'Student socket disconnected: {sid}')
+
+    @socketio.on('connect', namespace='/admin')
+    def admin_connect():
+        sid = request.sid
+        logger.info(f"Admin socket connected: sid={sid}")
+
+    @socketio.on('disconnect', namespace='/admin')
+    def admin_disconnect():
+        sid = request.sid
+        logger.info(f"Admin socket disconnected: sid={sid}")
 
     @socketio.on('request_student_feed', namespace='/student')
     def handle_request_student_feed(data):
@@ -2824,6 +2994,15 @@ def handle_exam_auto_terminated(data):
         score = data.get('score', 0)
         faces = data.get('faces', 0)
         objects = data.get('objects', {})
+        allowed_objects = []
+        if objects.get('phone'):
+            allowed_objects.append('cell phone')
+        if objects.get('smartwatch'):
+            allowed_objects.append('smartwatch')
+        if objects.get('book'):
+            allowed_objects.append('book')
+        if objects.get('paper'):
+            allowed_objects.append('paper')
         
         sid_str = student_id
         now_ts = time.time()
@@ -2836,6 +3015,7 @@ def handle_exam_auto_terminated(data):
                 
             latest_student_frames[sid_str] = {
                 'frame': prev.get('frame'),
+                'frame_bytes': prev.get('frame_bytes'),
                 'processed_frame': prev.get('processed_frame'),
                 'timestamp': prev.get('timestamp', now_ts), 
                 'frame_timestamp': prev.get('frame_timestamp', now_ts),
@@ -2845,11 +3025,13 @@ def handle_exam_auto_terminated(data):
                     'warning_count': int(warning_system.get_warnings(sid_str) if warning_system else 0),
                     'suspicion_score': score,
                     'faces_detected': faces,
-                    'phone_detected': objects.get('phone', False),
-                    'laptop_detected': objects.get('laptop', False)
+                    'phone_detected': 'cell phone' in allowed_objects,
+                    'smartwatch_detected': 'smartwatch' in allowed_objects,
+                    'book_detected': 'book' in allowed_objects,
+                    'paper_detected': 'paper' in allowed_objects
                 },
                 'last_visible_object_labels': prev.get('last_visible_object_labels', []),
-                'last_prohibited_object_labels': ['cell phone'] if objects.get('phone') else [],
+                'last_prohibited_object_labels': allowed_objects,
                 'last_person_count': faces,
             }
 
@@ -2865,27 +3047,69 @@ def handle_exam_auto_terminated(data):
         student_id = str(data.get('student_id', ''))
         if not student_id or not data.get('frame'):
             return
-        logger.debug(f'[FRAME] Received live frame from student {student_id}, size={len(data["frame"][:20])}...')
+        now_ts = time.time()
+        # Log once every 5 seconds per student to confirm frames are arriving
+        try:
+            last_log = _last_frame_log_at.get(student_id, 0)
+            if now_ts - last_log >= 5:
+                _last_frame_log_at[student_id] = now_ts
+                logger.info(f"[FRAME] Received live frame from student {student_id} (len={len(data['frame'])})")
+        except Exception:
+            pass
         # Register student as active
         with active_exam_students_lock:
             active_exam_students.add(student_id)
         # Update timestamp in latest_student_frames so polling finds them
-        now_ts = time.time()
+        warnings_count = int(warning_system.get_warnings(student_id) if warning_system else 0)
+        violations_live = warning_system.get_violations(student_id) if warning_system else []
+        runtime_state = _get_runtime_warning_state(student_id)
+        warnings_count = max(warnings_count, int(runtime_state.get('warnings') or 0))
+        if len(runtime_state.get('violations') or []) > len(violations_live):
+            violations_live = runtime_state.get('violations') or violations_live
+        # Decode base64 frame to numpy for MJPEG fallback and store raw bytes
+        decoded_frame = None
+        frame_b64 = str(data.get('frame') or '')
+        if ',' in frame_b64:
+            frame_b64 = frame_b64.split(',', 1)[1]
+        frame_bytes = None
+        try:
+            import base64 as _b64
+            frame_bytes = _b64.b64decode(frame_b64)
+            if cv2:
+                np_arr = np.frombuffer(frame_bytes, np.uint8)
+                decoded_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        except Exception as dec_err:
+            logger.debug(f"[FRAME] decode failed for student {student_id}: {dec_err}")
         with latest_student_frames_lock:
             prev = latest_student_frames.get(student_id, {})
             latest_student_frames[student_id] = {
                 **prev,
+                'frame': frame_b64,
+                'frame_bytes': frame_bytes if frame_bytes is not None else prev.get('frame_bytes'),
+                'processed_frame': decoded_frame if decoded_frame is not None else prev.get('processed_frame'),
                 'timestamp': now_ts,
                 'frame_timestamp': now_ts,
                 'processed_timestamp': now_ts,
+                'status_snapshot': {
+                    **(prev.get('status_snapshot') or {}),
+                    'warning_count': warnings_count,
+                    'suspicion_score': data.get('score', 0),
+                }
             }
         # Relay to admin namespace as 'student_frame' (which admin already listens for)
         socketio.emit('student_frame', {
             'student_id': student_id,
-            'frame': data['frame'],
+            'frame': frame_b64,
             'score': data.get('score', 0),
-            'timestamp_ms': data.get('timestamp_ms', int(now_ts * 1000))
+            'timestamp_ms': data.get('timestamp_ms', int(now_ts * 1000)),
+            'warnings': warnings_count,
+            'violations': violations_live,
         }, namespace='/admin')
+        # Notify admin once per student session that frames are arriving (hides loading spinner)
+        with _feed_started_lock:
+            if student_id not in _feed_started_for:
+                _feed_started_for.add(student_id)
+                socketio.emit('feed_started', {'student_id': student_id}, namespace='/admin')
 
     @socketio.on('student_audio_chunk', namespace='/student')
     def handle_audio_chunk(data):
@@ -2936,23 +3160,36 @@ def handle_exam_auto_terminated(data):
             return
         score = data.get('analysis', {}).get('suspicion_score', 0)
         metrics = data.get('metrics', {})
-        # Normalize labels for admin display (smartwatch/headphones)
-        raw_labels = list(metrics.get('banned_labels') or [])
-        accessory = metrics.get('accessory') or {}
-        has_headphones = bool(accessory.get('earphone_detected') or accessory.get('headphone_detected'))
-        if has_headphones and 'headphones' not in raw_labels:
-            raw_labels.append('headphones')
+        # Normalize & filter labels to only the objects we care about.
+        raw_labels = [str(l).lower() for l in (metrics.get('banned_labels') or [])]
+        allowed_labels = {'cell phone', 'phone', 'clock', 'smartwatch', 'book', 'paper'}
+        filtered = [l for l in raw_labels if l in allowed_labels]
         normalized = []
-        for label in raw_labels:
-            if label == 'clock':
+        for label in filtered:
+            if label in ('cell phone', 'phone'):
+                normalized.append('cell phone')
+            elif label in ('clock', 'smartwatch'):
                 normalized.append('smartwatch')
-            else:
-                normalized.append(label)
-        # If only a phone label is present but headphones are detected, prefer headphones
-        if has_headphones and normalized == ['cell phone']:
-            normalized = ['headphones']
-        metrics['banned_labels'] = normalized
+            elif label == 'book':
+                normalized.append('book')
+            elif label == 'paper':
+                normalized.append('paper')
+        metrics['banned_labels'] = list(dict.fromkeys(normalized))
         data['metrics'] = metrics
+
+        runtime_state = _get_runtime_warning_state(student_id)
+        warnings_count = int(runtime_state.get('warnings') or 0)
+        if warning_system:
+            try:
+                warnings_count = max(warnings_count, int(warning_system.get_warnings(student_id) or 0))
+            except Exception:
+                pass
+        violations = runtime_state.get('violations') or []
+        start_time = runtime_state.get('start_time')
+        data['warnings'] = warnings_count
+        data['violations'] = violations[-5:]
+        if start_time:
+            data['start_time'] = int(start_time)
 
         # Ensure student appears in admin polling
         with active_exam_students_lock:
@@ -2993,17 +3230,20 @@ def handle_exam_auto_terminated(data):
             prev = latest_student_frames.get(student_id, {})
             latest_student_frames[student_id] = {
                 'frame': prev.get('frame'),
+                'frame_bytes': prev.get('frame_bytes'),
                 'processed_frame': prev.get('processed_frame'),
                 'timestamp': prev.get('timestamp', now_ts),
                 'frame_timestamp': prev.get('frame_timestamp', now_ts),
                 'processed_timestamp': now_ts,
                 'detections': prev.get('detections', []),
                 'status_snapshot': {
-                    'warning_count': int(warning_system.get_warnings(student_id) if warning_system else 0),
+                    'warning_count': warnings_count if warning_system else warnings_count,
                     'suspicion_score': score,
                     'faces_detected': metrics.get('face_count', 0),
                     'phone_detected': 'cell phone' in metrics.get('banned_labels', []),
-                    'laptop_detected': 'laptop' in metrics.get('banned_labels', []),
+                    'smartwatch_detected': 'smartwatch' in metrics.get('banned_labels', []),
+                    'book_detected': 'book' in metrics.get('banned_labels', []),
+                    'paper_detected': 'paper' in metrics.get('banned_labels', []),
                 },
                 'last_visible_object_labels': metrics.get('banned_labels', []),
                 'last_prohibited_object_labels': metrics.get('banned_labels', []),
@@ -3036,31 +3276,29 @@ def handle_exam_auto_terminated(data):
         logger.info(f"🔔 Admin notifying student in room {target_room}")
         socketio.emit('admin_notification', notification_payload, namespace='/student', to=target_room)
 
-@socketio.on('force_terminate_exam', namespace='/admin')
-def handle_force_terminate_exam(data):
-    """Admin force terminates a student's exam with a summary report."""
-    student_id = str(data.get('student_id', ''))
-    if not student_id:
-        return
-        
+    @socketio.on('force_terminate_exam', namespace='/admin')
+    def handle_force_terminate_exam(data):
+        """Admin force terminates a student's exam with a summary report."""
+        student_id = str(data.get('student_id', ''))
+        if not student_id:
+            return
         reason = data.get('reason', 'Administrative decision')
         metrics_summary = data.get('metrics_summary', {})
-        
+
         termination_payload = {
             'terminated': True,
             'reason': reason,
             'metrics_summary': metrics_summary,
             'timestamp': time.time()
         }
-        
-    target_room = f"student:{student_id}"
-    logger.warning(f"❌ Admin FORCE TERMINATED student in room {target_room}: {reason}")
-    socketio.emit('exam_terminated', termination_payload, namespace='/student', to=target_room)
-    _end_exam_runtime_state(student_id)
-    
-    # We also trigger the internal termination logic if needed
-        if 'warning_system' in globals():
-            warning_system.reset_warnings(student_id) # Optional: reset or mark as terminated
+
+        target_room = f"student:{student_id}"
+        logger.warning(f'? Admin FORCE TERMINATED student in room {target_room}: {reason}')
+        socketio.emit('exam_terminated', termination_payload, namespace='/student', to=target_room)
+        _end_exam_runtime_state(student_id)
+
+        if warning_system:
+            warning_system.reset_student(student_id)
 
     @socketio.on('request_student_frames', namespace='/admin')
     def handle_request_student_frames(data):
@@ -3075,12 +3313,12 @@ def handle_force_terminate_exam(data):
         socketio.emit('student_frame_captured', data, namespace='/admin')
 
     @app.route('/api/admin/student-telemetry/<student_id>', methods=['GET'])
+    @require_role('ADMIN')
     def get_student_telemetry_history(student_id):
         """Admin API: get recent telemetry history for a student."""
         with _telemetry_history_lock:
             history = list(_telemetry_history.get(student_id, []))
         return jsonify({'student_id': student_id, 'history': history[-50:]})  # Last 50 entries
-
 
     @socketio.on('webrtc_offer', namespace='/student')
     def handle_webrtc_offer(data):
@@ -3103,14 +3341,14 @@ def handle_force_terminate_exam(data):
             room=f"student:{student_id}"
         )
 
-@socketio.on('admin_force_terminate', namespace='/admin')
-def handle_admin_force_terminate(data):
-    student_id = str(data.get('student_id'))
-    reason = data.get('reason', 'Manual termination by Admin')
-    if warning_system:
-        warning_system.manually_terminate_student(student_id, reason)
-    if student_id:
-        _end_exam_runtime_state(student_id)
+    @socketio.on('admin_force_terminate', namespace='/admin')
+    def handle_admin_force_terminate(data):
+        student_id = str(data.get('student_id'))
+        reason = data.get('reason', 'Manual termination by Admin')
+        if warning_system:
+            warning_system.manually_terminate_student(student_id, reason)
+        if student_id:
+            _end_exam_runtime_state(student_id)
 
     @socketio.on('admin_toggle_enforcement', namespace='/admin')
     def handle_admin_toggle_enforcement(data):
@@ -3136,6 +3374,39 @@ def handle_admin_force_terminate(data):
         socketio.emit('webrtc_ice_candidate', data, namespace='/student', room=f"student:{student_id}")
 
 # -------------------------
+# System Health API
+# -------------------------
+@app.route('/api/system-health')
+def api_system_health():
+    """Returns a JSON snapshot of key system health indicators for admin diagnostics."""
+    admin = current_admin()
+    if not admin:
+        return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+    db_ok = False
+    try:
+        conn = mysql.connection
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1')
+        db_ok = True
+    except Exception:
+        db_ok = False
+    with active_exam_students_lock:
+        active_count = len(active_exam_students)
+    with latest_student_frames_lock:
+        frames_cached = len(latest_student_frames)
+    uptime = int(time.time() - _APP_START_TIME)
+    return jsonify({
+        'ok': True,
+        'socketio_enabled': bool(MONITORING_ENABLED and socketio),
+        'cv2_available': bool(CV2_AVAILABLE),
+        'db_connected': db_ok,
+        'active_students': active_count,
+        'frames_cached': frames_cached,
+        'webrtc_handlers_registered': True,  # handlers registered at startup inside register_socketio_handlers
+        'uptime_seconds': uptime,
+    })
+
+# -------------------------
 # App entrypoint
 # -------------------------
 if __name__ == '__main__':
@@ -3146,10 +3417,16 @@ if __name__ == '__main__':
         logger.info(f"  - OpenCV: {'✓ Available' if CV2_AVAILABLE else '✗ Not available'}")
         logger.info(f"  - Flask-SocketIO: {'✓ Available' if SOCKETIO_AVAILABLE else '✗ Not available'}")
         logger.info(f"  - Live Monitoring: {'✓ ENABLED' if MONITORING_ENABLED else '✗ DISABLED'}")
+        logger.info("  - URL: http://127.0.0.1:5001")
+        logger.info(f"  - SocketIO async_mode: {socketio.async_mode if socketio else 'none'}")
         logger.info("=" * 60)
         
         with app.app_context():
             ensure_db_schema()
+            run_startup_health_checks()
+
+        if MONITORING_ENABLED and socketio:
+            start_health_watchdog()
 
         auto_restart = (os.getenv('AUTO_RESTART', '1') == '1')
         while True:

@@ -944,23 +944,23 @@ class ProctorCore {
     const roll = face.roll_deg ?? 0;
     const gazeYaw = face.gaze_yaw_deg ?? 0;
     const gazePitch = face.gaze_pitch_deg ?? 0;
-    if (Math.abs(yaw) > 24) {
+    if (Math.abs(yaw) > 15) {
       risk += 10;
       reasons.push("Head yaw off-axis");
     }
-    if (Math.abs(pitch) > 18) {
+    if (Math.abs(pitch) > 12) {
       risk += 9;
       reasons.push("Head pitch off-axis");
     }
-    if (Math.abs(roll) > 15) {
+    if (Math.abs(roll) > 12) {
       risk += 6;
       reasons.push("Head roll tilt");
     }
-    if (Math.abs(gazeYaw) > 22) {
+    if (Math.abs(gazeYaw) > 12) {
       risk += 11;
       reasons.push("Eye gaze horizontal drift");
     }
-    if (Math.abs(gazePitch) > 16) {
+    if (Math.abs(gazePitch) > 10) {
       risk += 9;
       reasons.push("Eye gaze vertical drift");
     }
