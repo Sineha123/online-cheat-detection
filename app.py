@@ -106,6 +106,9 @@ profileName = None
 # Configuration & Globals
 # -------------------------
 app = Flask(__name__, template_folder='templates', static_folder='static')
+def _static_path(*parts):
+    """Return an absolute path under the Flask static folder."""
+    return os.path.join(app.static_folder, *parts)
 def _get_or_create_secret_key():
     """Get a stable secret key - persists across restarts to keep sessions alive."""
     env_key = os.getenv('FLASK_SECRET_KEY', '').strip()
@@ -129,6 +132,12 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = (os.getenv('COOKIE_SECURE', '0') == '1')
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)
+
+# Ensure recording folders exist so admin panel can list files immediately.
+try:
+    os.makedirs(_static_path('recording', 'audio'), exist_ok=True)
+except Exception:
+    pass
 
 @app.before_request
 def make_session_permanent():
@@ -611,6 +620,20 @@ def _reset_exam_runtime_state(student_id):
                 'student_name': runtime_warning_state[sid].get('student_name', 'Unknown'),
                 'violations': []
             }
+    if warning_system:
+        warning_system.reset_student(sid)
+
+def _end_exam_runtime_state(student_id):
+    """Remove student from live monitoring state and reset warning cache."""
+    sid = str(student_id)
+    with active_exam_students_lock:
+        active_exam_students.discard(sid)
+    with latest_student_frames_lock:
+        latest_student_frames.pop(sid, None)
+    with student_detection_state_lock:
+        student_detection_state.pop(sid, None)
+    with runtime_warning_state_lock:
+        runtime_warning_state.pop(sid, None)
     if warning_system:
         warning_system.reset_student(sid)
 
@@ -1132,6 +1155,40 @@ def examSessionStart():
         return jsonify({'ok': False, 'error': 'Failed to start exam session'}), 500
 
 
+@app.route('/api/exam-session/end', methods=['POST'])
+@require_role('STUDENT')
+@rate_limit('exam_end', max_requests=10, window_seconds=60)
+def examSessionEnd():
+    """End monitoring and mark exam session finished/terminated."""
+    user = current_user()
+    if not user:
+        return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+
+    data = request.get_json(silent=True) or {}
+    student_id = str(user['Id'])
+    terminated = bool(data.get('terminated'))
+    reason = str(data.get('reason') or '')
+
+    try:
+        _end_exam_runtime_state(student_id)
+        try:
+            cur = mysql.connection.cursor()
+            status = 'TERMINATED' if terminated else 'COMPLETED'
+            cur.execute("""
+                UPDATE exam_sessions
+                SET Status=%s, EndTime=NOW()
+                WHERE StudentID=%s AND Status='IN_PROGRESS'
+            """, (status, student_id))
+            mysql.connection.commit()
+            cur.close()
+        except Exception as db_err:
+            logger.warning(f"examSessionEnd DB error (continuing): {db_err}")
+
+        return jsonify({'ok': True, 'terminated': terminated, 'reason': reason})
+    except Exception as e:
+        logger.error(f"examSessionEnd error: {e}", exc_info=True)
+        return jsonify({'ok': False, 'error': 'Failed to end exam session'}), 500
+
 
 @app.route('/api/proctor/manifest', methods=['GET'])
 def proctorManifest():
@@ -1202,12 +1259,7 @@ def examAction():
     # legacy python monitor disabled
     
     if sid_str:
-        with active_exam_students_lock:
-            active_exam_students.discard(sid_str)
-        with latest_student_frames_lock:
-            latest_student_frames.pop(sid_str, None)
-        with student_detection_state_lock:
-            student_detection_state.pop(sid_str, None)
+        _end_exam_runtime_state(sid_str)
     
     # Calculate results (prefer server-side derivation from submitted question list)
     time_spent = data.get('time_spent', 0)
@@ -1635,8 +1687,8 @@ def adminResults():
 @require_role('ADMIN')
 def adminRecordings():
     """List saved exam session videos and audio recordings."""
-    video_dir = os.path.join('static', 'recording')
-    audio_dir = os.path.join('static', 'recording', 'audio')
+    video_dir = _static_path('recording')
+    audio_dir = _static_path('recording', 'audio')
     videos = []
     audios = []
 
@@ -1702,6 +1754,7 @@ def adminRecordings():
                     inf_name, inf_id, inf_start = infer_from_name(name)
                     videos.append({
                         'name': name,
+                        'static_path': f"recording/{name}",
                         'mime_type': 'video/webm' if name.lower().endswith('.webm') else ('video/ogg' if name.lower().endswith('.ogg') else 'video/mp4'),
                         'size': os.path.getsize(full),
                         'mtime': os.path.getmtime(full),
@@ -1720,6 +1773,7 @@ def adminRecordings():
                     inferred_student, inferred_id, inferred_start = infer_from_name(name)
                     audios.append({
                         'name': name,
+                        'static_path': f"recording/audio/{name}",
                         'size': os.path.getsize(full),
                         'mtime': os.path.getmtime(full),
                         'student_name': inferred_student,
@@ -1804,12 +1858,12 @@ def _safe_send_from_dir(base_dir, filename):
 @app.route('/download/recording/video/<path:filename>')
 @require_role('ADMIN')
 def download_recording_video(filename):
-    return _safe_send_from_dir(os.path.join('static', 'recording'), filename)
+    return _safe_send_from_dir(_static_path('recording'), filename)
 
 @app.route('/download/recording/audio/<path:filename>')
 @require_role('ADMIN')
 def download_recording_audio(filename):
-    return _safe_send_from_dir(os.path.join('static', 'recording', 'audio'), filename)
+    return _safe_send_from_dir(_static_path('recording', 'audio'), filename)
 
 @app.route('/adminStudents')
 @require_role('ADMIN')
@@ -2274,7 +2328,7 @@ def api_upload_audio():
         elif 'mp4' in content_type or 'm4a' in content_type:
             ext = '.m4a'
 
-        audio_dir = os.path.join('static', 'recording', 'audio')
+        audio_dir = _static_path('recording', 'audio')
         os.makedirs(audio_dir, exist_ok=True)
         filename = f"{student_id}_{student_name}_{timestamp}{ext}"
         file.save(os.path.join(audio_dir, filename))
@@ -2319,7 +2373,7 @@ def api_upload_session_recording():
             if guessed_ext in ('.webm', '.mp4', '.ogg', '.mkv'):
                 ext = guessed_ext
 
-        video_dir = os.path.join('static', 'recording')
+        video_dir = _static_path('recording')
         os.makedirs(video_dir, exist_ok=True)
         filename = f"{student_id}_{student_name}_{session_start}{ext}"
         output_path = os.path.join(video_dir, filename)
@@ -2460,9 +2514,11 @@ def api_student_warnings(student_id):
 def api_all_student_warnings():
     """Return warnings for all active students"""
     result = {}
+    active_ids = set()
     if warning_system:
         with warning_system.lock:
             for sid, count in warning_system.warnings.items():
+                active_ids.add(str(sid))
                 result[str(sid)] = {
                     'warnings': count,
                     'name': warning_system.student_names.get(sid, 'Unknown'),
@@ -2470,13 +2526,119 @@ def api_all_student_warnings():
                 }
     with runtime_warning_state_lock:
         for sid, rec in runtime_warning_state.items():
+            active_ids.add(str(sid))
             current = result.setdefault(str(sid), {'warnings': 0, 'name': rec.get('student_name', 'Unknown'), 'violations': []})
             current['warnings'] = max(int(current.get('warnings') or 0), int(rec.get('warnings') or 0))
             if len(rec.get('violations') or []) > len(current.get('violations') or []):
                 current['violations'] = list(rec.get('violations') or [])
             if not current.get('name'):
                 current['name'] = rec.get('student_name', 'Unknown')
+    # Attach start_time (epoch ms) when available so admin UI can show accurate duration.
+    try:
+        if active_ids:
+            cur = mysql.connection.cursor()
+            placeholders = ','.join(['%s'] * len(active_ids))
+            cur.execute(
+                f"SELECT StudentID, StartTime FROM exam_sessions WHERE Status='IN_PROGRESS' AND StudentID IN ({placeholders})",
+                tuple(active_ids)
+            )
+            for sid, start_time in cur.fetchall():
+                sid_str = str(sid)
+                if sid_str in result and start_time:
+                    result[sid_str]['start_time'] = int(start_time.timestamp() * 1000)
+            cur.close()
+    except Exception as e:
+        logger.warning(f"api_all_student_warnings start_time fetch failed: {e}")
     return jsonify(result)
+
+@app.route('/api/admin-active-students')
+@require_role('ADMIN')
+def api_admin_active_students():
+    """Return a list of active students with live warnings and start times."""
+    ensure_db_schema()
+    active_ids = set()
+
+    with active_exam_students_lock:
+        active_ids.update(str(sid) for sid in active_exam_students)
+    with latest_student_frames_lock:
+        active_ids.update(str(sid) for sid in latest_student_frames.keys())
+    with runtime_warning_state_lock:
+        active_ids.update(str(sid) for sid in runtime_warning_state.keys())
+    if warning_system:
+        with warning_system.lock:
+            active_ids.update(str(sid) for sid in warning_system.warnings.keys())
+
+    if not active_ids:
+        return jsonify({'students': []})
+
+    names = {}
+    start_times = {}
+    try:
+        cur = mysql.connection.cursor()
+        placeholders = ','.join(['%s'] * len(active_ids))
+        cur.execute(f"SELECT ID, Name FROM students WHERE ID IN ({placeholders})", tuple(active_ids))
+        for sid, name in cur.fetchall():
+            names[str(sid)] = name or f"Student {sid}"
+        cur.execute(
+            f"SELECT StudentID, StartTime FROM exam_sessions WHERE Status='IN_PROGRESS' AND StudentID IN ({placeholders})",
+            tuple(active_ids)
+        )
+        for sid, start_time in cur.fetchall():
+            if start_time:
+                start_times[str(sid)] = int(start_time.timestamp() * 1000)
+        cur.close()
+    except Exception as e:
+        logger.warning(f"admin-active-students DB fetch failed: {e}")
+
+    students = []
+    for sid in active_ids:
+        warnings_count = 0
+        violations = []
+        if warning_system:
+            warnings_count = int(warning_system.get_warnings(sid) or 0)
+            violations = warning_system.get_violations(sid) or []
+        runtime_state = _get_runtime_warning_state(sid)
+        warnings_count = max(warnings_count, int(runtime_state.get('warnings') or 0))
+        if len(runtime_state.get('violations') or []) > len(violations):
+            violations = runtime_state.get('violations') or violations
+
+        last_update_ms = None
+        telemetry_metrics = None
+        telemetry_analysis = None
+        telemetry_snapshot = None
+        with latest_student_frames_lock:
+            entry = latest_student_frames.get(sid)
+            if entry and entry.get('timestamp'):
+                last_update_ms = int(float(entry['timestamp']) * 1000)
+            telemetry_snapshot = entry.get('wasm_telemetry') if entry else None
+            if telemetry_snapshot:
+                telemetry_metrics = telemetry_snapshot.get('metrics') or {}
+                telemetry_analysis = telemetry_snapshot.get('analysis') or {}
+            elif entry and entry.get('status_snapshot'):
+                telemetry_metrics = {
+                    'face_count': entry['status_snapshot'].get('faces_detected'),
+                    'banned_labels': entry.get('last_prohibited_object_labels') or []
+                }
+                telemetry_analysis = {
+                    'suspicion_score': entry['status_snapshot'].get('suspicion_score', 0),
+                    'active_flags': entry['status_snapshot'].get('active_flags', [])
+                }
+
+        students.append({
+            'student_id': sid,
+            'student_name': names.get(sid) or runtime_state.get('student_name') or f"Student {sid}",
+            'warnings': min(warnings_count, 3),
+            'violations': violations,
+            'start_time': start_times.get(sid),
+            'last_update': last_update_ms,
+            'metrics': telemetry_metrics or {},
+            'suspicion_score': (telemetry_analysis or {}).get('suspicion_score', 0),
+            'active_flags': (telemetry_analysis or {}).get('active_flags') or [],
+            'banned_labels': (telemetry_metrics or {}).get('banned_labels') or [],
+            'face_count': (telemetry_metrics or {}).get('face_count')
+        })
+
+    return jsonify({'students': students})
 
 # Pipeline API endpoints were removed since inference runs in client WASM
 
@@ -2596,18 +2758,20 @@ if MONITORING_ENABLED and socketio:
         except Exception as db_err:
             logger.warning(f"Live violation DB save failed: {db_err}")
 
-    @socketio.on('exam_auto_terminated', namespace='/student')
-    def handle_exam_auto_terminated(data):
-        """Student exam terminated due to max warnings"""
-        student_id   = data.get('student_id')
-        student_name = data.get('student_name', 'Unknown')
-        reason       = data.get('reason', 'Max warnings reached')
-        logger.info(f"🚫 Exam auto-terminated: student={student_id}")
-        socketio.emit('student_exam_terminated', {
-            'student_id':   student_id,
-            'student_name': student_name,
-            'reason':       reason,
-        }, namespace='/admin')
+@socketio.on('exam_auto_terminated', namespace='/student')
+def handle_exam_auto_terminated(data):
+    """Student exam terminated due to max warnings"""
+    student_id   = data.get('student_id')
+    student_name = data.get('student_name', 'Unknown')
+    reason       = data.get('reason', 'Max warnings reached')
+    logger.info(f"🚫 Exam auto-terminated: student={student_id}")
+    if student_id:
+        _end_exam_runtime_state(str(student_id))
+    socketio.emit('student_exam_terminated', {
+        'student_id':   student_id,
+        'student_name': student_name,
+        'reason':       reason,
+    }, namespace='/admin')
 
     @socketio.on('terminate_exam', namespace='/student')
     def handle_terminate_exam(data):
@@ -2872,12 +3036,12 @@ if MONITORING_ENABLED and socketio:
         logger.info(f"🔔 Admin notifying student in room {target_room}")
         socketio.emit('admin_notification', notification_payload, namespace='/student', to=target_room)
 
-    @socketio.on('force_terminate_exam', namespace='/admin')
-    def handle_force_terminate_exam(data):
-        """Admin force terminates a student's exam with a summary report."""
-        student_id = str(data.get('student_id', ''))
-        if not student_id:
-            return
+@socketio.on('force_terminate_exam', namespace='/admin')
+def handle_force_terminate_exam(data):
+    """Admin force terminates a student's exam with a summary report."""
+    student_id = str(data.get('student_id', ''))
+    if not student_id:
+        return
         
         reason = data.get('reason', 'Administrative decision')
         metrics_summary = data.get('metrics_summary', {})
@@ -2889,11 +3053,12 @@ if MONITORING_ENABLED and socketio:
             'timestamp': time.time()
         }
         
-        target_room = f"student:{student_id}"
-        logger.warning(f"❌ Admin FORCE TERMINATED student in room {target_room}: {reason}")
-        socketio.emit('exam_terminated', termination_payload, namespace='/student', to=target_room)
-        
-        # We also trigger the internal termination logic if needed
+    target_room = f"student:{student_id}"
+    logger.warning(f"❌ Admin FORCE TERMINATED student in room {target_room}: {reason}")
+    socketio.emit('exam_terminated', termination_payload, namespace='/student', to=target_room)
+    _end_exam_runtime_state(student_id)
+    
+    # We also trigger the internal termination logic if needed
         if 'warning_system' in globals():
             warning_system.reset_warnings(student_id) # Optional: reset or mark as terminated
 
@@ -2938,12 +3103,14 @@ if MONITORING_ENABLED and socketio:
             room=f"student:{student_id}"
         )
 
-    @socketio.on('admin_force_terminate', namespace='/admin')
-    def handle_admin_force_terminate(data):
-        student_id = str(data.get('student_id'))
-        reason = data.get('reason', 'Manual termination by Admin')
-        if warning_system:
-            warning_system.manually_terminate_student(student_id, reason)
+@socketio.on('admin_force_terminate', namespace='/admin')
+def handle_admin_force_terminate(data):
+    student_id = str(data.get('student_id'))
+    reason = data.get('reason', 'Manual termination by Admin')
+    if warning_system:
+        warning_system.manually_terminate_student(student_id, reason)
+    if student_id:
+        _end_exam_runtime_state(student_id)
 
     @socketio.on('admin_toggle_enforcement', namespace='/admin')
     def handle_admin_toggle_enforcement(data):

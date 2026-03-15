@@ -130,12 +130,12 @@
                             <div class="collapse" id="video-{{ loop.index }}">
                                 <div class="p-3">
                                     <video controls class="synced-video" data-audio-id="video-audio-{{ loop.index }}" style="width:100%; border-radius:10px;">
-                                        <source src="{{ url_for('static', filename='recording/' + v.name) }}" type="{{ v.mime_type or 'video/mp4' }}">
+                                        <source src="{{ url_for('static', filename=v.static_path or ('recording/' + v.name)) }}" type="{{ v.mime_type or 'video/mp4' }}">
                                         Your browser does not support the video tag.
                                     </video>
                                     {% if v.matched_audio and not v.name.lower().endswith('.webm') and not v.name.lower().endswith('.ogg') %}
                                     <audio id="video-audio-{{ loop.index }}" preload="metadata" style="display:none;">
-                                        <source src="{{ url_for('static', filename='recording/audio/' + v.matched_audio.name) }}">
+                                        <source src="{{ url_for('static', filename=v.matched_audio.static_path or ('recording/audio/' + v.matched_audio.name)) }}">
                                     </audio>
                                     <div class="file-meta mt-2">
                                         <i class='bx bxs-microphone'></i>

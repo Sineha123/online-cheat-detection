@@ -1398,7 +1398,8 @@
         // ============================================
         const MARKS_PER_QUESTION = 2;
         const DEFAULT_TOTAL_QUESTIONS = 125;
-        const EXAM_DURATION_SECONDS = DEFAULT_TOTAL_QUESTIONS * 60;
+        const EXAM_DURATION_MINUTES = 60;
+        const EXAM_DURATION_SECONDS = EXAM_DURATION_MINUTES * 60;
         const QUESTIONS_PER_SUBJECT = 25;
         let currentQuestion = 0;
         let score = 0;
@@ -1412,6 +1413,22 @@
         let preExamFaceVerified = false;
         let preExamVerifiedAt = 0;
         let faceVerifyInProgress = false;
+
+        function endExamSessionOnServer(terminated = false, reason = '') {
+            try {
+                fetch('/api/exam-session/end', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': CSRF_TOKEN
+                    },
+                    body: JSON.stringify({
+                        terminated: Boolean(terminated),
+                        reason: String(reason || '')
+                    })
+                }).catch(() => { });
+            } catch (_) { }
+        }
 
         const studentId = "{{ student_id|default(0) }}";
         const studentName = "{{ student_name|default('Student') }}";
@@ -1728,6 +1745,14 @@
             }
 
             examStarted = true;
+            // Reset live readings/state for a fresh attempt
+            warningSystem.gazeDirection = null;
+            warningSystem.gazeDirectionSince = 0;
+            warningSystem.gazeDirectionFrames = 0;
+            warningSystem.currentWarnings = 0;
+            warningSystem.updateSecurityStatus();
+            timeLeft = EXAM_DURATION_SECONDS;
+            updateTimerDisplay();
             if (!sessionStartedOk) {
                 // Retry non-blocking in background; don't block student camera feed
                 fetch('/api/exam-session/start', {
@@ -1750,15 +1775,37 @@
             // Display Suspicion UI and Start Engine
             document.getElementById('suspicion-meter-container').style.display = 'block';
             if (remoteFrameUploader.proctorEngine) {
-                await remoteFrameUploader.proctorEngine.start();
+                try {
+                    await remoteFrameUploader.proctorEngine.start();
+                } catch (e) {
+                    console.warn('Proctor engine start failed; continuing without block:', e);
+                }
             }
 
             // Start timer and monitoring
             startTimer();
             startMonitoring();
-            await voiceMonitor.start();
+            try {
+                await voiceMonitor.start();
+            } catch (e) {
+                console.warn('Voice monitor start failed:', e);
+            }
             sessionRecordingStartedAt = Date.now();
-            await sessionRecorder.start();
+            const camReady = await waitForCameraReady();
+            if (camReady !== false) {
+                try {
+                    const ok = await sessionRecorder.start();
+                    if (!ok) {
+                        setTimeout(() => {
+                            if (examStarted && !warningSystem.examTerminated) {
+                                sessionRecorder.start().catch(() => { });
+                            }
+                        }, 1500);
+                    }
+                } catch (e) {
+                    console.warn('Session recorder start failed:', e);
+                }
+            }
         }
 
         // ============================================
@@ -1872,10 +1919,17 @@
         async function finishExamAsync() {
             clearInterval(timerInterval);
             examStarted = false;
+            endExamSessionOnServer(false, 'Exam completed');
             await Promise.allSettled([
                 voiceMonitor.stop(),
                 sessionRecorder.stop()
             ]);
+            if (window.remoteFrameUploader) {
+                remoteFrameUploader.stop();
+                if (remoteFrameUploader.proctorEngine) {
+                    remoteFrameUploader.proctorEngine.stop();
+                }
+            }
 
             const totalScore = selectedQuestions.length * MARKS_PER_QUESTION;
             const percentage = Math.round((score / totalScore) * 100);
@@ -2074,12 +2128,11 @@
         // TIMER FUNCTIONS
         // ============================================
         function startTimer() {
-            const startAt = Date.now();
-            const totalSeconds = EXAM_DURATION_SECONDS;
+            const endAt = Date.now() + (EXAM_DURATION_SECONDS * 1000);
             if (timerInterval) clearInterval(timerInterval);
             const tick = () => {
-                const elapsed = Math.floor((Date.now() - startAt) / 1000);
-                timeLeft = Math.max(0, totalSeconds - elapsed);
+                const remainingMs = Math.max(0, endAt - Date.now());
+                timeLeft = Math.max(0, Math.floor(remainingMs / 1000));
                 updateTimerDisplay();
                 if (timeLeft <= 0) {
                     clearInterval(timerInterval);
@@ -2092,16 +2145,19 @@
         }
 
         function updateTimerDisplay() {
+            const displayEl = document.getElementById('time-display');
+            const timerEl = document.getElementById('timer');
+            if (!displayEl || !timerEl) return;
             const minutes = Math.floor(timeLeft / 60);
             const seconds = timeLeft % 60;
-            document.getElementById('time-display').textContent =
+            displayEl.textContent =
                 minutes.toString().padStart(2, '0') + ':' + seconds.toString().padStart(2, '0');
 
             // Change color when time is running low
             if (timeLeft < 300) { // 5 minutes
-                document.getElementById('timer').style.background = 'linear-gradient(135deg, var(--danger), #dc2626)';
+                timerEl.style.background = 'linear-gradient(135deg, var(--danger), #dc2626)';
             } else if (timeLeft < 600) { // 10 minutes
-                document.getElementById('timer').style.background = 'linear-gradient(135deg, var(--warning), #f59e0b)';
+                timerEl.style.background = 'linear-gradient(135deg, var(--warning), #f59e0b)';
             }
         }
 
@@ -2164,6 +2220,8 @@
             document.getElementById('display-student-id').textContent = '(ID: ' + studentId + ')';
             document.getElementById('footer-student-name').textContent = studentName;
             document.getElementById('footer-student-id').textContent = studentId;
+            timeLeft = EXAM_DURATION_SECONDS;
+            updateTimerDisplay();
 
             console.log(`Student: ${studentName} (ID: ${studentId}) ready for exam.`);
         });
@@ -2196,10 +2254,11 @@
             faceObscuredFrames: 0,
             gazeDirection: null,
             gazeDirectionFrames: 0,
+            gazeDirectionSince: 0,
             syncTimer: null,
             lastServerViolationSignature: '',
-            globalWarningGapMs: 3500,        // 3.5-second global gap
-            postAcknowledgeGraceMs: 3500,    // 3.5s pause after "I understand"
+            globalWarningGapMs: 1500,        // Faster warnings (1-2s)
+            postAcknowledgeGraceMs: 3000,    // 3s pause after "I understand"
             duplicateKeyWindowMs: 4000,
             typeCooldownsMs: {
                 'VOICE_DETECTED': 4000,
@@ -2220,6 +2279,8 @@
                 'NOT_FORWARD': 4000,
                 'NO_FACE': 4000,
                 'FACE_OBSCURED': 5000,
+                'PROHIBITED_OBJECT': 1200,
+                'DISTRACTION': 2000,
                 'GAZE_LEFT': 4000,
                 'GAZE_RIGHT': 4000,
                 'GAZE_UP': 4000,
@@ -2664,21 +2725,25 @@
                 }
             },
 
-            classifyGazeDirection(yawDeg, pitchDeg) {
+            classifyGazeDirection(yawDeg, pitchDeg, headYawDeg) {
                 const yaw = Number.isFinite(yawDeg) ? yawDeg : 0;
                 const pitch = Number.isFinite(pitchDeg) ? pitchDeg : 0;
+                const headYaw = Number.isFinite(headYawDeg) ? headYawDeg : 0;
 
                 // Assumed thresholds (center, hard left/right, diagonals)
-                const CENTER_YAW = 16;
-                const CENTER_PITCH = 16;
-                const HARD_YAW = 50;
+                const CENTER_YAW = 12;
+                const CENTER_PITCH = 18;
+                const HARD_YAW = 24;
+                const HEAD_YAW = 18;
 
                 if (Math.abs(yaw) <= CENTER_YAW && Math.abs(pitch) <= CENTER_PITCH) {
                     return { code: 'CENTER', flag: null, label: 'Center' };
                 }
 
-                if (yaw <= -HARD_YAW) return { code: 'HARD_LEFT', flag: 'GAZE_LEFT', label: 'Hard left' };
-                if (yaw >= HARD_YAW) return { code: 'HARD_RIGHT', flag: 'GAZE_RIGHT', label: 'Hard right' };
+                const left = yaw <= -HARD_YAW && headYaw <= -HEAD_YAW;
+                const right = yaw >= HARD_YAW && headYaw >= HEAD_YAW;
+                if (left) return { code: 'HARD_LEFT', flag: 'GAZE_LEFT', label: 'Hard left' };
+                if (right) return { code: 'HARD_RIGHT', flag: 'GAZE_RIGHT', label: 'Hard right' };
 
                 return { code: 'CENTER', flag: null, label: 'Center' };
             },
@@ -2696,6 +2761,7 @@
 
                 this.examTerminated = true;
                 examStarted = false;
+                endExamSessionOnServer(true, reason || 'Exam terminated');
                 if (typeof voiceMonitor !== 'undefined') voiceMonitor.stop();
                 if (typeof sessionRecorder !== 'undefined') sessionRecorder.stop();
                 if (window.remoteFrameUploader && remoteFrameUploader.proctorEngine) {
@@ -3142,20 +3208,22 @@
                         }))) : [];
                         
                         // ── Gaze Direction Tracking ──
-                        const gazeDir = warningSystem.classifyGazeDirection(m.gaze_yaw_deg, m.gaze_pitch_deg);
+                        const gazeDir = warningSystem.classifyGazeDirection(m.gaze_yaw_deg, m.gaze_pitch_deg, m.yaw_deg);
+                        const nowTs = Date.now();
                         if (gazeDir && gazeDir.code !== 'CENTER') {
                             if (warningSystem.gazeDirection !== gazeDir.code) {
                                 warningSystem.gazeDirection = gazeDir.code;
-                                warningSystem.gazeDirectionFrames = 1;
-                            } else {
-                                warningSystem.gazeDirectionFrames++;
+                                warningSystem.gazeDirectionSince = nowTs;
+                                warningSystem.gazeDirectionFrames = 0;
+                            }
+                            const heldMs = nowTs - (warningSystem.gazeDirectionSince || nowTs);
+                            if (heldMs >= 3000 && gazeDir.flag) {
+                                if (!flagsArr.includes(gazeDir.flag)) flagsArr.push(gazeDir.flag);
                             }
                         } else {
                             warningSystem.gazeDirection = null;
+                            warningSystem.gazeDirectionSince = 0;
                             warningSystem.gazeDirectionFrames = 0;
-                        }
-                        if (warningSystem.gazeDirectionFrames > 75 && gazeDir && gazeDir.flag) {
-                            if (!flagsArr.includes(gazeDir.flag)) flagsArr.push(gazeDir.flag);
                         }
 
                         // ── Pose Tracking (disabled to reduce false positives) ──
@@ -3248,6 +3316,7 @@
                                     warningSystem.addWarning({ type: 'DISTRACTION', details: warningSystem.gazeBannerForFlag(activeGazeFlag).replace('Warning: ', ''), severity: 'medium', student_id: studentId });
                                     warningSystem.gazeDirection = null;
                                     warningSystem.gazeDirectionFrames = 0;
+                                    warningSystem.gazeDirectionSince = 0;
                                 }
                             }
                         } else {

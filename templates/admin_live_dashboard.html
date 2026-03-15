@@ -1136,20 +1136,23 @@
                     pollHealthyUntil = Date.now() + 7000;
                     updateConnectionStatus(true);
                     const list = (data && data.students) ? data.students : [];
+                    const activeSet = new Set(list.map((s) => String(s.student_id)));
                     if (list.length > 0) {
                         document.getElementById('loading-message').style.display = 'none';
                     }
                     let structureChanged = false;
                     list.forEach(student => {
                         const sid = String(student.student_id);
+                        const startMs = normalizeTimestamp(student.start_time || student.startTime);
+                        const lastUpdateMs = normalizeTimestamp(student.last_update || student.lastUpdate);
                         if (!studentsData[sid]) {
                             structureChanged = true;
                             studentsData[sid] = {
                                 ...student,
                                 warnings: Math.min(student.warnings || 0, 3),
-                                startTime: Date.now(),
+                                startTime: startMs || Date.now(),
                                 endTime: null,
-                                lastUpdate: Date.now(),
+                                lastUpdate: lastUpdateMs || Date.now(),
                                 lastFrame: null
                             };
                         } else {
@@ -1157,10 +1160,21 @@
                                 ...studentsData[sid],
                                 ...student,
                                 warnings: Math.min(student.warnings || 0, 3),
-                                startTime: studentsData[sid].startTime || Date.now(),
-                                lastUpdate: Date.now(),
+                                startTime: studentsData[sid].startTime || startMs || Date.now(),
+                                lastUpdate: lastUpdateMs || Date.now(),
                                 endTime: studentsData[sid].endTime || (student.warnings >= 3 ? Date.now() : null)
                             };
+                        }
+                    });
+                    // Remove students that are no longer active (exam ended)
+                    Object.keys(studentsData).forEach((sid) => {
+                        if (!activeSet.has(String(sid))) {
+                            const stu = studentsData[sid];
+                            const last = Number(stu && stu.lastUpdate) || 0;
+                            if (Date.now() - last > 5000) {
+                                delete studentsData[sid];
+                                structureChanged = true;
+                            }
                         }
                     });
                     updateDashboard(structureChanged);
@@ -1208,19 +1222,19 @@
 
             const durationText = formatDuration(student);
 
-            card.innerHTML = `
-                <div class="student-header ${warningClass}">
-                    <span class="student-name">${student.student_name}</span>
-                    <span class="student-status">
-                        ${warningLevel === 0 ? '✅ Safe' :
-                    warningLevel === 1 ? '⚠️ Watch' :
-                        warningLevel === 2 ? '🚨 Alert' : '❌ Critical'}
-                    </span>
-                </div>
-                <div id="objects-${student.student_id}" class="detected-objects" style="padding:4px 12px; font-size:12px; font-weight:600; color:#f87171; background:rgba(248,113,113,0.08); min-height:0; line-height:1.4;"></div>
-                <div class="video-container" style="position:relative;">
-                    <div class="warning-pill ${warningClass}">${Math.min(student.warnings || 0, 3)}/3</div>
-                    ${tamperBadge}
+              card.innerHTML = `
+                  <div class="student-header ${warningClass}">
+                      <span class="student-name">${student.student_name}</span>
+                      <span class="student-status">
+                          ${warningLevel === 0 ? '✅ Safe' :
+                      warningLevel === 1 ? '⚠️ Watch' :
+                          warningLevel === 2 ? '🚨 Alert' : '❌ Critical'}
+                      </span>
+                  </div>
+                  <div id="objects-${student.student_id}" class="detected-objects" style="padding:4px 12px; font-size:12px; font-weight:600; color:#f87171; background:rgba(248,113,113,0.08); min-height:0; line-height:1.4;"></div>
+                  <div class="video-container" style="position:relative;">
+                      <div class="warning-pill ${warningClass}" data-role="warning-pill">${Math.min(student.warnings || 0, 3)}/3</div>
+                      ${tamperBadge}
                     <!-- Legacy Fallback Image (z-index 1) -->
                     <img class="live-feed" data-mode="mjpeg" src="/admin/live/${student.student_id}" alt="Live Feed" style="position:relative; z-index:1;">
                     <!-- WebRTC Live P2P Stream (z-index 2) overlaying the legacy post -->
@@ -1231,20 +1245,20 @@
                         <span class="info-label">Student ID:</span>
                         <span class="info-value">#${student.student_id}</span>
                     </div>
-                    <div class="info-row">
-                        <span class="info-label">Warnings:</span>
-                        <span class="warning-badge ${warningClass}">
-                            ${warningLevel}/3
-                        </span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Violations:</span>
-                        <span class="info-value">${Math.min(student.violations?.length || 0, 3)}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Duration:</span>
-                        <span class="info-value">${durationText}</span>
-                    </div>
+                      <div class="info-row">
+                          <span class="info-label">Warnings:</span>
+                          <span class="warning-badge ${warningClass}" data-role="warning-badge">
+                              ${warningLevel}/3
+                          </span>
+                      </div>
+                      <div class="info-row">
+                          <span class="info-label">Violations:</span>
+                          <span class="info-value" data-role="violations-count">${Math.min(student.violations?.length || 0, 3)}</span>
+                      </div>
+                      <div class="info-row">
+                          <span class="info-label">Duration:</span>
+                          <span class="info-value" data-role="duration">${durationText}</span>
+                      </div>
 
                     <!-- Enhanced Threat Matrix -->
                     <div class="threat-matrix">
@@ -1269,11 +1283,11 @@
                         </div>
                     </div>
                 </div>
-                ${student.violations && student.violations.length > 0 ? `
-                    <div class="violations-list">
-                        ${student.violations.slice(-3).reverse().map(violation => `
-                            <div class="violation-item">
-                                <strong>${violation.type || 'Violation'}</strong>
+                  ${student.violations && student.violations.length > 0 ? `
+                      <div class="violations-list" data-role="violations-list">
+                          ${student.violations.slice(-3).reverse().map(violation => `
+                              <div class="violation-item">
+                                  <strong>${violation.type || 'Violation'}</strong>
                                 <div class="violation-time">${violation.time || 'Recent'}</div>
                                 ${violation.details ? `<div style="font-size: 11px; margin-top: 2px;">${violation.details}</div>` : ''}
                             </div>
@@ -1306,6 +1320,8 @@
             if (!student) return;
 
             const score = student.suspicion_score ?? 0;
+            const warningLevel = Math.min(Number(student.warnings || 0), 3);
+            const warningClass = `warning-${warningLevel}`;
 
             // Update card badge color based on score
             const card = document.getElementById(`student-${sid}`);
@@ -1317,6 +1333,25 @@
                 }
                 if (statusEl) {
                     statusEl.textContent = score < 30 ? '✅ Safe' : score < 60 ? '⚠️ Watch' : score < 80 ? '🚨 Alert' : '❌ Critical';
+                }
+
+                const warnBadge = card.querySelector('[data-role="warning-badge"]');
+                if (warnBadge) {
+                    warnBadge.textContent = `${warningLevel}/3`;
+                    warnBadge.className = `warning-badge ${warningClass}`;
+                }
+                const warnPill = card.querySelector('[data-role="warning-pill"]');
+                if (warnPill) {
+                    warnPill.textContent = `${warningLevel}/3`;
+                    warnPill.className = `warning-pill ${warningClass}`;
+                }
+                const violCount = card.querySelector('[data-role="violations-count"]');
+                if (violCount) {
+                    violCount.textContent = String(Math.min(student.violations?.length || 0, 3));
+                }
+                const durationEl = card.querySelector('[data-role="duration"]');
+                if (durationEl) {
+                    durationEl.textContent = formatDuration(student);
                 }
             }
 
@@ -1358,6 +1393,32 @@
                     gazeEl.classList.add('threat-high');
                 } else {
                     gazeEl.classList.remove('threat-high');
+                }
+            }
+
+            // Update violations list
+            if (card) {
+                const listEl = card.querySelector('[data-role="violations-list"]');
+                const violations = (student.violations || []).slice(-3).reverse();
+                if (violations.length > 0) {
+                    const html = violations.map(violation => `
+                        <div class="violation-item">
+                            <strong>${violation.type || 'Violation'}</strong>
+                            <div class="violation-time">${violation.time || 'Recent'}</div>
+                            ${violation.details ? `<div style="font-size: 11px; margin-top: 2px;">${violation.details}</div>` : ''}
+                        </div>
+                    `).join('');
+                    if (listEl) {
+                        listEl.innerHTML = html;
+                    } else {
+                        const container = document.createElement('div');
+                        container.className = 'violations-list';
+                        container.setAttribute('data-role', 'violations-list');
+                        container.innerHTML = html;
+                        card.appendChild(container);
+                    }
+                } else if (listEl) {
+                    listEl.remove();
                 }
             }
 
@@ -1411,10 +1472,29 @@
             }
         }
 
+        function normalizeTimestamp(value) {
+            if (!value) return null;
+            if (typeof value === 'number') {
+                return value < 1e12 ? Math.round(value * 1000) : value;
+            }
+            if (typeof value === 'string') {
+                const asNum = Number(value);
+                if (!Number.isNaN(asNum) && asNum > 0) {
+                    return asNum < 1e12 ? Math.round(asNum * 1000) : asNum;
+                }
+                const parsed = Date.parse(value);
+                if (!Number.isNaN(parsed)) return parsed;
+            }
+            return null;
+        }
+
         function formatDuration(student) {
-            if (!student || !student.startTime) return '--';
-            const end = student.endTime || student.lastUpdate || Date.now();
-            const seconds = Math.max(0, Math.floor((end - student.startTime) / 1000));
+            if (!student) return '--';
+            const startMs = normalizeTimestamp(student.startTime || student.start_time);
+            if (!startMs) return '--';
+            const endRaw = student.endTime || student.lastUpdate || Date.now();
+            const end = normalizeTimestamp(endRaw) || Date.now();
+            const seconds = Math.max(0, Math.floor((end - startMs) / 1000));
             const hours = Math.floor(seconds / 3600);
             const mins = Math.floor((seconds % 3600) / 60);
             const secs = seconds % 60;
@@ -1722,7 +1802,7 @@
                 const sidText = card.id.replace('student-', '');
                 const key = String(sidText);
                 if (!studentsData[key] || !studentsData[key].startTime) return;
-                const durationEl = card.querySelector('.info-row:last-child .info-value');
+                const durationEl = card.querySelector('[data-role="duration"]');
                 if (durationEl) {
                     durationEl.textContent = formatDuration(studentsData[key]);
                 }
@@ -1742,6 +1822,7 @@
                     Object.keys(data).forEach(sid => {
                         const info = data[sid] || {};
                         const key = String(sid);
+                        const startMs = normalizeTimestamp(info.start_time);
                         // Ensure we have a record for this student
                         if (!studentsData[key]) {
                             studentsData[key] = {
@@ -1749,7 +1830,7 @@
                                 student_name: info.name || `Student ${key}`,
                                 warnings: 0,
                                 violations: [],
-                                startTime: info.start_time || Date.now(),
+                                startTime: startMs || Date.now(),
                                 endTime: null,
                                 lastFrame: null,
                                 lastUpdate: Date.now()
@@ -1758,7 +1839,7 @@
                         }
                         const stu = studentsData[key];
                         stu.lastUpdate = Date.now();
-                        if (!stu.startTime) stu.startTime = info.start_time || Date.now();
+                        if (!stu.startTime) stu.startTime = startMs || Date.now();
                         // Update warnings count from server truth
                         const cappedWarnings = Math.min(info.warnings || 0, 3);
                         if (stu.warnings !== cappedWarnings) {

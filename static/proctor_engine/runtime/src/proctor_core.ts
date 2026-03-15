@@ -135,25 +135,12 @@ const COCO_CLASSES = [
 
 const BANNED_LABELS = new Set([
   "cell phone",
-  "book",
-  "laptop",
-  "tablet",
-  "remote",
-  "mouse",
-  "keyboard"
+  "clock", // smartwatch (COCO uses "clock")
+  "book",  // book/paper notes
+  "paper"
 ]);
 
-const ACCESSORY_LABELS = new Set([
-  "headphone",
-  "headphones",
-  "headset",
-  "earphone",
-  "earphones",
-  "earbud",
-  "earbuds",
-  "wire",
-  "cable"
-]);
+const ACCESSORY_LABELS = new Set<string>([]);
 
 const MONITORED_OBJECT_LABELS = Array.from(new Set([...BANNED_LABELS, ...ACCESSORY_LABELS]));
 
@@ -162,70 +149,36 @@ const RIGHT_EYE: [number, number, number, number, number, number] = [362, 385, 3
 
 const YOLO_INPUT_SIZE = 640;
 const LIGHTING_MIN_SCORE = 0.52;
-const OBJECT_STABLE_FRAMES = 2;
+const OBJECT_STABLE_FRAMES = 1;
 const OBJECT_EMA_ALPHA = 0.34;
 const OBJECT_EMA_DECAY = 0.78;
 const OBJECT_HIGH_CONF_MARGIN = 0.2;
-const ACCESSORY_STABLE_FRAMES = 2;
+const ACCESSORY_STABLE_FRAMES = 1;
 const ACCESSORY_EMA_ALPHA = 0.35;
 const LIGHTING_EMA_ALPHA = 0.28;
 
 const CLASS_CONF_THRESHOLDS: Record<string, number> = {
   person: 0.5,
   'cell phone': 0.15,
-  'laptop': 0.20,
   'book': 0.15,
   'clock': 0.20,
-  'remote': 0.15,
-  'mouse': 0.15,
-  'keyboard': 0.15,
-  headset: 0.45,
-  earphone: 0.30,
-  earphones: 0.30,
-  earbud: 0.30,
-  earbuds: 0.30,
-  wire: 0.12,
-  cable: 0.12
+  'paper': 0.15
 };
 
 const MIN_AREA_RATIO_BY_LABEL: Record<string, number> = {
   person: 0.01,
   'cell phone': 0.001,
-  'laptop': 0.005,
   'book': 0.001,
-  'clock': 0.005,
-  'remote': 0.001,
-  'mouse': 0.001,
-  'keyboard': 0.001,
-  headphone: 0.0022,
-  headphones: 0.0022,
-  headset: 0.0022,
-  earphone: 0.0006,
-  earphones: 0.0006,
-  earbud: 0.0005,
-  earbuds: 0.0005,
-  wire: 0.0002,
-  cable: 0.0002
+  'clock': 0.0012,
+  'paper': 0.001
 };
 
 const MIN_SHORT_SIDE_PX_BY_LABEL: Record<string, number> = {
   person: 40,
   "cell phone": 8,
   book: 15,
-  laptop: 20,
-  tablet: 18,
-  remote: 8,
-  mouse: 8,
-  keyboard: 15,
-  headphone: 20,
-  headphones: 20,
-  headset: 20,
-  earphone: 7,
-  earphones: 7,
-  earbud: 6,
-  earbuds: 6,
-  wire: 4,
-  cable: 4
+  clock: 12,
+  paper: 12
 };
 
 const ACCESSORY_SCORE_THRESHOLDS = {
@@ -383,7 +336,21 @@ export class ProctorCore {
       heuristicAccessoryLabels.push("headphone_heuristic");
     }
 
-    const bannedLabels = Array.from(new Set([...stabilizedLabels.banned, ...stabilizedLabels.accessory, ...heuristicAccessoryLabels])).sort();
+    const rawBannedLabels = Array.from(new Set([
+      ...stabilizedLabels.banned,
+      ...stabilizedLabels.accessory,
+      ...heuristicAccessoryLabels
+    ]));
+    const labelDisplayMap: Record<string, string> = {
+      "clock": "smartwatch",
+      "book": "book/paper",
+      "paper": "paper"
+    };
+    const allowedDisplay = new Set(["cell phone", "smartwatch", "book/paper", "paper"]);
+    const bannedLabels = rawBannedLabels
+      .map((label) => labelDisplayMap[label] || label)
+      .filter((label) => allowedDisplay.has(label))
+      .sort();
 
     const analysis = this.engine.process({
       timestamp_ms: Date.now(),

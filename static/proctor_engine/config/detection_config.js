@@ -30,18 +30,12 @@ export const COCO_CLASSES = [
 // ── Banned & Accessory Labels ───────────────────────────
 export const BANNED_LABELS = new Set([
   'cell phone',
-  'laptop',
-  'book',       // Paper/notes
-  'clock',      // Smartwatch
-  'mouse',      // Wired objects
-  'keyboard',   // Wired objects
-  'remote',     // Clickers/wired devices
-  'tablet'
+  'clock',      // Smartwatch (COCO uses "clock")
+  'book',       // Book/paper notes
+  'paper'       // Included for UI mapping; model won't detect directly
 ]);
 
-export const ACCESSORY_LABELS = new Set([
-  "headphone","headphones","headset","earphone","earphones","earbud","earbuds","wire","cable"
-]);
+export const ACCESSORY_LABELS = new Set([]);
 
 export const MONITORED_OBJECT_LABELS = Array.from(new Set([...BANNED_LABELS, ...ACCESSORY_LABELS]));
 
@@ -49,39 +43,27 @@ export const MONITORED_OBJECT_LABELS = Array.from(new Set([...BANNED_LABELS, ...
 export const CLASS_CONF_THRESHOLDS = {
   person: 0.50,
   'cell phone': 0.15,
-  'laptop': 0.20,
   'book': 0.15,
   'clock': 0.20,
-  'remote': 0.15,
-  'mouse': 0.15,
-  'keyboard': 0.15,
-  'tablet': 0.28, // Kept original tablet value as it wasn't in the instruction's list of changes
-  headphone: 2.0, // Disabled
-  headphones: 2.0, // Disabled
-  headset: 2.0, // Disabled
-  earphone: 2.0, earphones: 2.0, earbud: 2.0, earbuds: 2.0,
-  wire: 2.0, // Disabled
-  cable: 2.0 // Disabled
+  'paper': 0.15
 };
 
 // ── Minimum Area Ratio (bbox area / frame area) ─────────
 export const MIN_AREA_RATIO_BY_LABEL = {
   person: 0.01,
-  "cell phone": 4e-4, book: 15e-4, laptop: 4e-3, tablet: 20e-4,
-  remote: 5e-4, mouse: 5e-4, keyboard: 20e-4,
-  headphone: 22e-4, headphones: 22e-4, headset: 22e-4,
-  earphone: 6e-4, earphones: 6e-4, earbud: 5e-4, earbuds: 5e-4,
-  wire: 20e-5, cable: 20e-5
+  "cell phone": 4e-4,
+  book: 15e-4,
+  clock: 12e-4,
+  paper: 10e-4
 };
 
 // ── Minimum Short-side Pixels ───────────────────────────
 export const MIN_SHORT_SIDE_PX_BY_LABEL = {
   person: 40,
-  "cell phone": 8, book: 15, laptop: 20, tablet: 18,
-  remote: 8, mouse: 8, keyboard: 15,
-  headphone: 20, headphones: 20, headset: 20,
-  earphone: 7, earphones: 7, earbud: 6, earbuds: 6,
-  wire: 4, cable: 4
+  "cell phone": 8,
+  book: 15,
+  clock: 12,
+  paper: 12
 };
 
 // ── Face Landmark Indices ───────────────────────────────
@@ -89,11 +71,11 @@ export const LEFT_EYE  = [33, 160, 158, 133, 153, 144];
 export const RIGHT_EYE = [362, 385, 387, 263, 373, 380];
 
 // ── Temporal Stabilization ──────────────────────────────
-export const OBJECT_STABLE_FRAMES    = 2;
+export const OBJECT_STABLE_FRAMES    = 1;
 export const OBJECT_EMA_ALPHA        = 0.34;
 export const OBJECT_EMA_DECAY        = 0.78;
 export const OBJECT_HIGH_CONF_MARGIN = 0.20;
-export const ACCESSORY_STABLE_FRAMES = 2;
+export const ACCESSORY_STABLE_FRAMES = 1;
 export const ACCESSORY_EMA_ALPHA     = 0.35;
 export const LIGHTING_EMA_ALPHA      = 0.28;
 export const LIGHTING_MIN_SCORE      = 0.52;
