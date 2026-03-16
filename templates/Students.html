@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href='https://unpkg.com/boxicons@2.0.9/css/boxicons.min.css' rel='stylesheet'>
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css">
-    <title>Students Management - CheatBuster Admin</title>
+    <title>Students Management - Online CheatBuster Admin</title>
 
     <style>
         :root {
@@ -990,7 +990,7 @@
     <section id="sidebar">
         <a href="#" class="brand">
             <i class='bx bxs-graduation'></i>
-            <span class="text">CheatBuster</span>
+                        <span class="text">Online CheatBuster</span>
         </a>
         <ul class="side-menu top">
             <li class="active">
@@ -1304,6 +1304,7 @@
                                                     <!-- Hidden field for webcam image -->
                                                     <input type="hidden" name="webcam_image"
                                                         id="webcamImage{{student.id}}">
+                                                    <div id="captureStatus{{student.id}}" class="text-muted mt-2"></div>
 
                                                     <hr class="my-4">
 
@@ -1470,10 +1471,11 @@
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
     <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/js/bootstrap.min.js"></script>
-    <script>
-        // Webcam streams storage
-        let webcamStreams = {};
-        let socket = null;
+        <script>
+            // Webcam streams storage
+            let webcamStreams = {};
+            let webcamCaptureData = {};
+            let socket = null;
 
         // Initialize Socket.IO connection for live monitoring
         function initializeSocketIO() {
@@ -1808,6 +1810,11 @@
 
             // Set hidden input for form submission
             hiddenInput.value = imageData;
+            webcamCaptureData[studentId] = imageData;
+            const captureStatus = document.getElementById('captureStatus' + studentId);
+            if (captureStatus) {
+                captureStatus.innerHTML = '<span style="color:green">✓ Photo captured — click "Register Face" to save.</span>';
+            }
 
             // Stop webcam
             if (webcamStreams[studentId]) {
@@ -1821,8 +1828,6 @@
             // Update steps
             document.getElementById('step1-' + studentId).classList.add('completed');
             document.getElementById('step2-' + studentId).classList.add('active');
-
-            alert('✓ Photo captured successfully! Click "Register Face" to save.');
         }
 
         // Auto-hide flash messages after 5 seconds
@@ -1848,6 +1853,9 @@
                         }
                         const webcamInput = document.getElementById('webcamImage' + studentId);
                         if (webcamInput) webcamInput.value = '';
+                        webcamCaptureData[studentId] = null;
+                        const captureStatus = document.getElementById('captureStatus' + studentId);
+                        if (captureStatus) captureStatus.innerHTML = '';
                         const fileInput = this.querySelector('input[name="face_image"]');
                         if (fileInput) fileInput.value = '';
                         const preview = document.getElementById('preview' + studentId);
@@ -1862,19 +1870,18 @@
                 form.addEventListener('submit', function (e) {
                     // Register Face modal: require either uploaded file OR webcam capture.
                     if (this.id && this.id.startsWith('registerForm')) {
+                        const studentId = this.id.replace('registerForm', '');
                         const fileInput = this.querySelector('input[name="face_image"]');
                         const webcamInput = this.querySelector('input[name="webcam_image"]');
-                        const previewImg = this.querySelector('.profile-preview');
+                        const previewImg = document.getElementById('preview' + studentId);
                         const hasFile = !!(fileInput && fileInput.files && fileInput.files.length > 0);
-                        const hasWebcam = !!(webcamInput && webcamInput.value && webcamInput.value.trim().length > 0);
-                        const previewSrc = previewImg ? (previewImg.getAttribute('src') || '').trim() : '';
-                        const hasPreview = !!(
-                            previewImg &&
-                            (previewImg.dataset.hasImage === 'true' ||
-                                previewSrc.startsWith('data:image') ||
-                                previewSrc.includes('/static/Profiles/'))
-                        );
-                        if (!hasFile && !hasWebcam && !hasPreview) {
+                        const captured = webcamCaptureData[studentId];
+                        const hasCaptured = !!(captured && captured.startsWith('data:image'));
+                        const hasPreview = !!(previewImg && (previewImg.dataset.hasImage === 'true' || (previewImg.src && previewImg.src.startsWith('data:image'))));
+                        if (hasCaptured && webcamInput) {
+                            webcamInput.value = captured;
+                        }
+                        if (!hasFile && !hasCaptured && !hasPreview) {
                             e.preventDefault();
                             alert('Please upload a photo or capture from webcam.');
                             return;

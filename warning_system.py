@@ -18,16 +18,18 @@ if hasattr(sys.stdout, "reconfigure"):
 class WarningSystem:
     """Track warnings per student and emit events when thresholds reached."""
     
-    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=3):
+    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=3, violation_writer=None):
         self.socketio = socketio_instance
         self.admin_monitor = admin_monitor
         self.max_warnings = max_warnings
+        self.violation_writer = violation_writer  # callable(student_id, session_id, vtype, details)
         auto_env = os.getenv('AUTO_TERMINATE_DEFAULT', '1')
         # Default ON so the Nth warning is shown then termination occurs after ~2 seconds.
         self.auto_terminate = str(auto_env).strip() not in ('0', 'false', 'False')
         self.lock = threading.Lock()
         self.warnings = {}  # student_id -> count
         self.violations = {}  # student_id -> list of violations
+        self._persisted = set()  # (sid, vtype, time_str)
         self.student_names = {}  # student_id -> name
         self.last_warning_at = {}  # student_id -> epoch seconds
         self.last_warning_type_at = {}  # student_id -> {type: epoch seconds}
@@ -48,6 +50,7 @@ class WarningSystem:
             'NO_FACE':              6.0,   # must be absent for >10s
             'DISTRACTION':          2.0,   # gaze/head away — needs repetition
             'HEAD_MOVEMENT':        1.0,
+            'HEAD_DOWN':            5.0,
             'STUDENT_LEFT_SEAT':    4.0,
             'EYES_CLOSED':          6.0,
             'GAZE_LEFT':            1.0,
@@ -126,6 +129,7 @@ class WarningSystem:
                 'details': details
             }
             self.violations[sid].append(violation)
+            self._persist_violation(sid, violation)
             
             count = self.warnings[sid]
             student_name = self.student_names.get(sid, 'Unknown')
@@ -171,6 +175,7 @@ class WarningSystem:
             def do_term():
                 reason = f"Reached {self.max_warnings} warnings for violations: {vtype}"
                 print(f"🚨 TERMINATING EXAM for student {student_id}: {reason}")
+                self.flush_violations_to_db(sid)
                 if self.socketio:
                     self.socketio.emit('student_exam_terminated', {
                         'student_id': student_id,
@@ -215,6 +220,7 @@ class WarningSystem:
             self.violations[sid] = []
             self.last_warning_at[sid] = 0.0
             self.last_warning_type_at[sid] = {}
+            self._persisted = {t for t in self._persisted if t[0] != sid}
         print(f"🧹 Cleared warnings for student {student_id}")
 
     def manually_terminate_student(self, student_id, reason="Manual termination by Admin"):
@@ -222,6 +228,7 @@ class WarningSystem:
         sid = str(student_id)
         with self.lock:
             student_name = self.student_names.get(sid, 'Unknown')
+        self.flush_violations_to_db(sid)
         
         print(f"🚨 MANUAL TERMINATE for student {student_id}: {reason}")
         if self.socketio:
@@ -237,6 +244,28 @@ class WarningSystem:
                 'auto_terminated': False
             }, namespace='/student')
         return True
+
+    # --------------------- Persistence helpers ---------------------
+    def _persist_violation(self, student_id, violation, session_id=None):
+        """Write violation via injected writer if available; dedupe via _persisted set."""
+        key = (student_id, str(violation.get('type')).upper(), violation.get('time'))
+        if key in self._persisted:
+            return
+        if not self.violation_writer:
+            return
+        try:
+            self.violation_writer(student_id, session_id, str(violation.get('type')).upper(), violation.get('details') or '')
+            self._persisted.add(key)
+        except Exception as e:
+            print(f"[WarningSystem] violation persist failed for {student_id}: {e}")
+
+    def flush_violations_to_db(self, student_id, session_id=None):
+        """Persist all stored violations for a student that haven't been written yet."""
+        sid = str(student_id)
+        with self.lock:
+            violations = list(self.violations.get(sid, []))
+        for vio in violations:
+            self._persist_violation(sid, vio, session_id=session_id)
 
 
 class TabSwitchDetector:

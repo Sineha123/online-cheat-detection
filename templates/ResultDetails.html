@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href='https://unpkg.com/boxicons@2.0.9/css/boxicons.min.css' rel='stylesheet'>
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css">
-    <title>Result Details - CheatBuster Admin</title>
+    <title>Result Details - Online CheatBuster Admin</title>
     <style>
         :root {
             --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -143,7 +143,7 @@
     <section id="sidebar">
         <a href="#" class="brand">
             <i class='bx bxs-graduation'></i>
-            <span class="text">CheatBuster</span>
+                        <span class="text">Online CheatBuster</span>
         </a>
         <ul class="side-menu top">
             <li>
@@ -248,7 +248,7 @@
                 <div class="stat-card">
                     <div class="stat-icon">⏱️</div>
                     <div class="stat-value">
-                        {% if result.time_spent %}
+                        {% if result.time_spent is not none %}
                             {{ result.time_spent // 60 }}m {{ result.time_spent % 60 }}s
                         {% else %}N/A{% endif %}
                     </div>
@@ -329,8 +329,13 @@
                 {% else %}
                 <div style="text-align:center;padding:50px;color:#aaa;">
                     <i class='bx bxs-shield-check' style="font-size:64px;color:#d1d5db;margin-bottom:15px;display:block;"></i>
-                    <h5 style="color:#6b7280;margin-bottom:8px;">No Violations Recorded</h5>
-                    <p style="font-size:14px;">This student completed the exam without any recorded violations.</p>
+                    {% if result.auto_terminated %}
+                        <h5 style="color:#f97316;margin-bottom:8px;">No violation rows saved</h5>
+                        <p style="font-size:14px;">Exam was auto-terminated due to warnings, but violation records may not have been persisted. Check server logs.</p>
+                    {% else %}
+                        <h5 style="color:#6b7280;margin-bottom:8px;">No Violations Recorded</h5>
+                        <p style="font-size:14px;">This student completed the exam without any recorded violations.</p>
+                    {% endif %}
                 </div>
                 {% endif %}
             </div>

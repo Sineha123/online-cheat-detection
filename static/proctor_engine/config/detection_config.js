@@ -107,3 +107,31 @@ export const EVAL = {
   multi_face_risk:      25,    // multiple faces
   safety_good_threshold: 72    // safetyLevel >= this → GOOD_TO_GO
 };
+
+// Voice detection (admin WebAudio pipeline)
+export const VOICE_RMS_THRESHOLD = 0.016;
+export const VOICE_ZCR_MIN = 0.08;
+export const VOICE_ZCR_MAX = 0.45;
+export const VOICE_SPECTRAL_FLUX_THRESHOLD = 0.012;
+export const VOICE_EMA_ALPHA = 0.3;
+export const VOICE_COOLDOWN_MS = 350;
+export const VOICE_HIGHPASS_HZ = 300;
+export const VOICE_LOWPASS_HZ = 3400;
+export const VOICE_FILTER_Q = 0.7;
+
+// Niqab/abaya fallback (eyes-only)
+export const NIQAB_MODE_ENABLED = true;
+export const EYE_PAIR_MIN_SEPARATION = 40;   // pixels between eye centers (downscaled frame)
+export const EYE_PAIR_MAX_SEPARATION = 200;
+
+// Gaze tuning (horizontal vs vertical with sustain)
+export const GAZE_HORIZONTAL_THRESHOLD = 0.32;       // offset from center (more sensitive)
+export const GAZE_VERTICAL_DOWN_THRESHOLD = 0.34;    // lenient down-gaze detection
+export const GAZE_VERTICAL_UP_THRESHOLD = 0.24;      // up-gaze is unusual, catch sooner
+export const GAZE_HORIZONTAL_SUSTAIN_MS = 1500;      // ~1.5s sustain
+export const GAZE_VERTICAL_SUSTAIN_MS = 2000;        // ~2s sustain
+
+// Book/notebook detection
+export const BOOK_LABELS = ['book','notebook','paper','magazine','journal','document','folder','textbook','copy','register'];
+export const BOOK_CONFIDENCE_THRESHOLD = 0.30;
+export const BOOK_AREA_MIN_RATIO = 0.02;             // allow smaller books/papers

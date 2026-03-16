@@ -156,6 +156,7 @@
                                 <th>Grade</th>
                                 <th>Time</th>
                                 <th>Warnings</th>
+                                <th>Violations</th>
                                 <th>Status</th>
                                 <th>Submitted</th>
                                 <th>Details</th>
@@ -184,18 +185,27 @@
                                         {{ result.percentage }}%
                                     </span>
                                 </td>
-                                <td><strong>{{ result.score }}/{{ (result.total_questions or 125) * 2 }}</strong></td>
+                                <td><strong>{{ result.score }}/{{ result.total_questions or 0 }}</strong></td>
                                 <td>
                                     <span class="grade-badge grade-{{ result.grade }}">{{ result.grade }}</span>
                                 </td>
                                 <td>
-                                    {% if result.time_spent %}{{ (result.time_spent // 60) }}m {{ result.time_spent % 60 }}s
+                                    {% if result.time_spent is not none %}{{ (result.time_spent // 60) }}m {{ result.time_spent % 60 }}s
                                     {% else %}N/A{% endif %}
                                 </td>
                                 <td>
-                                    {% set warn_display = result.warnings_issued if result.warnings_issued < 3 else 3 %}
+                                    {% set viol_count = result.violations if result.violations is defined else 0 %}
+                                    {% set warn_display = result.warnings_issued if result.warnings_issued is defined else 0 %}
+                                    {% set viol_count = [viol_count, warn_display]|max %}
+                                    {% set warn_display = [warn_display, viol_count]|max %}
+                                    {% set warn_display = [warn_display, 3]|min %}
                                     <span class="badge {% if warn_display == 0 %}badge-success{% elif warn_display == 1 %}badge-warning{% else %}badge-danger{% endif %}">
                                         {{ warn_display }}/3
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="badge {% if viol_count == 0 %}badge-success{% else %}badge-danger{% endif %}">
+                                        {{ viol_count }}
                                     </span>
                                 </td>
                                 <td>

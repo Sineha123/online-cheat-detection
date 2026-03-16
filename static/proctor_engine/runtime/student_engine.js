@@ -16,6 +16,11 @@ class StudentProctorEngine {
     __publicField(this, "lastProcessedAt", 0);
     __publicField(this, "emaEffectiveFps", 0);
     __publicField(this, "lastTelemetry", null);
+    __publicField(this, "lastBookCheckAt", 0);
+    __publicField(this, "bookDetectedUntil", 0);
+    __publicField(this, "bookBridgeHoldMs", 2500);
+    __publicField(this, "bookCheckCanvas", null);
+    __publicField(this, "bookCheckCtx", null);
     __publicField(this, "integrity", {
       checked: false,
       verified: false,
@@ -103,9 +108,31 @@ class StudentProctorEngine {
     const effectiveFps = 1e3 / cycleMs;
     this.emaEffectiveFps = this.emaEffectiveFps === 0 ? effectiveFps : this.emaEffectiveFps * 0.9 + effectiveFps * 0.1;
     const payload = this.buildTelemetry(out, this.emaEffectiveFps);
+    this.applyBookBridge(payload);
     this.lastTelemetry = payload;
     this.emitTelemetry(payload);
+    this.maybeServerBookCheck(source, payload.metrics?.banned_labels || []);
     return payload;
+  }
+  applyBookBridge(payload) {
+    if (!payload || !payload.metrics) {
+      return;
+    }
+    const now = Date.now();
+    if (this.bookDetectedUntil > now) {
+      const labels = Array.isArray(payload.metrics.banned_labels) ? payload.metrics.banned_labels.slice() : [];
+      if (!labels.includes("book")) {
+        labels.push("book");
+      }
+      payload.metrics.banned_labels = labels;
+      if (payload.analysis) {
+        const flags = Array.isArray(payload.analysis.active_flags) ? payload.analysis.active_flags.slice() : [];
+        if (!flags.includes("BOOK_DETECTED")) {
+          flags.push("BOOK_DETECTED");
+        }
+        payload.analysis.active_flags = flags;
+      }
+    }
   }
   buildTelemetry(out, effectiveFps) {
     return {
@@ -134,6 +161,8 @@ class StudentProctorEngine {
         roll_deg: out.face.roll_deg,
         gaze_yaw_deg: out.face.gaze_yaw_deg,
         gaze_pitch_deg: out.face.gaze_pitch_deg,
+        gaze_horiz_ratio: out.face.gaze_horiz_ratio,
+        gaze_vert_ratio: out.face.gaze_vert_ratio,
         ear_mean: out.analysis.metrics.ear_mean,
         gaze_offset: out.analysis.metrics.gaze_offset,
         lighting_score: out.lighting.score,
@@ -158,7 +187,8 @@ class StudentProctorEngine {
     const banned = payload.metrics.banned_labels || [];
     const legacyObjects = {
       phone: banned.includes("cell phone"),
-      laptop: banned.includes("laptop")
+      laptop: banned.includes("laptop"),
+      book: banned.includes("book") || banned.includes("book_heuristic")
     };
     this.socket.emit("telemetry_update", {
       student_id: payload.student_id,
@@ -166,6 +196,44 @@ class StudentProctorEngine {
       faces: payload.metrics.face_count,
       objects: legacyObjects
     });
+  }
+  maybeServerBookCheck(source, bannedLabels) {
+    const now = Date.now();
+    if (bannedLabels.some((l) => ["book", "book_heuristic", "paper", "notebook"].includes(l))) return;
+    if (this.bookDetectedUntil > now) return;
+    if (now - this.lastBookCheckAt < 2000) return;
+    this.lastBookCheckAt = now;
+    try {
+      if (!this.bookCheckCanvas) {
+        this.bookCheckCanvas = document.createElement("canvas");
+        this.bookCheckCtx = this.bookCheckCanvas.getContext("2d");
+      }
+      const w = 320;
+      const h = 240;
+      this.bookCheckCanvas.width = w;
+      this.bookCheckCanvas.height = h;
+      this.bookCheckCtx.drawImage(source, 0, 0, w, h);
+      const jpeg = this.bookCheckCanvas.toDataURL("image/jpeg", 0.6);
+      fetch("/api/detect-book", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: jpeg })
+      }).then((r) => r.json()).then((resp) => {
+        if (resp && resp.book_detected) {
+          const until = Date.now() + this.bookBridgeHoldMs;
+          this.bookDetectedUntil = Math.max(this.bookDetectedUntil, until);
+          if (this.lastTelemetry) {
+            const updated = JSON.parse(JSON.stringify(this.lastTelemetry));
+            this.applyBookBridge(updated);
+            updated.timestamp_ms = Date.now();
+            this.lastTelemetry = updated;
+            this.emitTelemetry(updated);
+          }
+        }
+      }).catch(() => {});
+    } catch (e) {
+      // ignore
+    }
   }
   async fetchAssetBytes(url) {
     const res = await fetch(url, { cache: "no-store" });

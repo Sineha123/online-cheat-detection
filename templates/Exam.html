@@ -1005,7 +1005,7 @@
                     </div>
                     <!-- Mobile Logo -->
                     <div class="brand-logo d-md-none" style="font-size: 16px;">
-                        <i class="fas fa-shield-alt me-1"></i>CheatBuster
+                        <i class="fas fa-shield-alt me-1"></i>Online CheatBuster
                     </div>
 
                     <div class="exam-timer" id="timer">
@@ -2256,16 +2256,25 @@
             gazeDirection: null,
             gazeDirectionFrames: 0,
             gazeDirectionSince: 0,
+            // ── SEPARATE HEAD POSE TRACKING (independent from gaze) ──
+            headPoseDirection: null,
+            headPoseDirectionSince: 0,
+            headPoseDirectionFrames: 0,
+            // ── END HEAD POSE TRACKING ──
             headMotionStreak: 0,
             prevHeadYaw: null,
             prevHeadPitch: null,
+            // ── HEAD DOWN DETECTION ──
+            headDownFrames: 0,
+            headDownSince: 0,
+            // ── END HEAD DOWN ──
             syncTimer: null,
             lastServerViolationSignature: '',
-            globalWarningGapMs: 900,         // Faster warnings (sub‑second cadence)
-            postAcknowledgeGraceMs: 1800,    // Shorter pause after "I understand"
+            globalWarningGapMs: 900,
+            postAcknowledgeGraceMs: 1800,
             duplicateKeyWindowMs: 4000,
             typeCooldownsMs: {
-                'VOICE_DETECTED': 4000,
+                'VOICE_DETECTED': 5000,
                 'MIC_OFF': 4000,
                 'CAMERA_OFF': 4000,
                 'CAMERA_BLOCKED': 4000,
@@ -2279,20 +2288,24 @@
                 'DEVTOOLS_OPENED': 4000,
                 'DEVTOOLS_SHORTCUT': 4000,
                 'KEYBOARD_SHORTCUT': 4000,
-                'GAZE_AWAY': 4000,
-                'NOT_FORWARD': 3000,
+                'GAZE_AWAY': 2000,
+                'NOT_FORWARD': 2000,
+                'HEAD_POSE': 2000,
                 'NO_FACE': 3000,
                 'FACE_OBSCURED': 3200,
                 'PROHIBITED_OBJECT': 900,
                 'DISTRACTION': 1800,
-                'GAZE_LEFT': 4000,
-                'GAZE_RIGHT': 4000,
-                'GAZE_UP': 4000,
-                'GAZE_DOWN': 4000,
-                'GAZE_UP_LEFT': 4000,
-                'GAZE_UP_RIGHT': 4000,
-                'GAZE_DOWN_LEFT': 4000,
-                'GAZE_DOWN_RIGHT': 4000
+                'GAZE_LEFT': 2000,
+                'GAZE_RIGHT': 2000,
+                'GAZE_UP': 2000,
+                'GAZE_DOWN': 2000,
+                'GAZE_UP_LEFT': 2000,
+                'GAZE_UP_RIGHT': 2000,
+                'GAZE_DOWN_LEFT': 2000,
+                'GAZE_DOWN_RIGHT': 2000,
+                'HEAD_DOWN': 7000,
+                'HEAD_MOVEMENT': 2000,
+                'MULTIPLE_FACES': 4000
             },
 
             init() {
@@ -2348,6 +2361,53 @@
                             bannerEl.classList.add('visible');
                             bannerEl.style.display = 'flex';
                         }
+                    });
+
+                    // Server-originated object detection (book/paper) -> warn student immediately
+                    this.socket.on('server_object_detected', (data) => {
+                        if (!data) return;
+                        const label = String(data.label || 'book');
+                        const details = String(data.details || `Prohibited item detected: ${label}`);
+                        const nowTs = Date.now();
+                        if (this.lastServerObjectLabel === label && (nowTs - (this.lastServerObjectTs || 0)) < 1200) {
+                            return; // dedupe rapid repeats
+                        }
+                        this.lastServerObjectLabel = label;
+                        this.lastServerObjectTs = nowTs;
+                        const total = Math.max(Number(data.total_warnings || 0), (this.currentWarnings || 0) + 1);
+                        this.addWarning({
+                            type: 'PROHIBITED_OBJECT',
+                            details,
+                            severity: 'high',
+                            total_warnings: total,
+                            source: 'server',
+                            student_id: studentId
+                        });
+                        // Force banner immediately even if telemetry hasn't carried banned_labels yet.
+                        const bannerEl = document.getElementById('proctor-warning-banner');
+                        const bannerTextEl = document.getElementById('warning-banner-text');
+                        if (bannerEl && bannerTextEl) {
+                            bannerTextEl.innerText = `⚠️ WARNING: Prohibited item detected (${label}) — remove it immediately!`;
+                            bannerEl.classList.add('visible');
+                            bannerEl.style.display = 'flex';
+                        }
+                    });
+
+                    // Server-issued warnings (generic bridge)
+                    this.socket.on('student_violation', (data) => {
+                        if (!data) return;
+                        const vio = data.violation || {};
+                        const vtype = String(data.type || vio.type || 'SERVER_WARNING');
+                        const details = String(data.details || vio.details || vtype);
+                        const total = Number(data.total_warnings || 0);
+                        this.addWarning({
+                            type: vtype,
+                            details,
+                            severity: 'high',
+                            total_warnings: total,
+                            source: 'server',
+                            student_id: studentId
+                        });
                     });
 
                     this.socket.on('terminate_exam', (data) => {
@@ -2734,10 +2794,11 @@
 
             classifyGazeDirection(yawDeg, pitchDeg, headYawDeg) {
                 const yaw = Number.isFinite(yawDeg) ? yawDeg : 0;
+                // Use native sign: negative = looking down, positive = looking up.
                 const pitch = Number.isFinite(pitchDeg) ? pitchDeg : 0;
                 const headYaw = Number.isFinite(headYawDeg) ? headYawDeg : 0;
 
-                // Tight thresholds — fire quickly for meaningful head/eye drift.
+                // GitHub reference thresholds (fast + directional)
                 const CENTER_YAW = 5;
                 const CENTER_PITCH = 7;
                 const HARD_YAW = 10;
@@ -2762,6 +2823,35 @@
                 if (up) return { code: 'UP', flag: 'GAZE_UP', label: 'Looking up' };
                 if (down) return { code: 'DOWN', flag: 'GAZE_DOWN', label: 'Looking down' };
 
+                return { code: 'CENTER', flag: null, label: 'Center' };
+            },
+
+            // ── HEAD POSE DIRECTION CLASSIFIER (separate from gaze) ──
+            // Classifies raw head pose (yaw/pitch from face landmarker) independently from eye gaze.
+            // Works even in burka/niqab since it tracks the face outline/nose direction.
+            classifyHeadPoseDirection(headYawDeg, headPitchDeg) {
+                const yaw = Number.isFinite(headYawDeg) ? headYawDeg : 0;
+                // Normalize pitch so negative = looking down, positive = looking up.
+                const pitch = Number.isFinite(headPitchDeg) ? -headPitchDeg : 0;
+                // Relaxed head-pose thresholds; down detection kept but lighter than before
+                const CENTER_YAW = 18;
+                const CENTER_PITCH = 18;
+                const TURN_YAW = 28;
+                const TURN_PITCH = 38;   // require noticeable nod, but not extreme
+                if (Math.abs(yaw) <= CENTER_YAW && Math.abs(pitch) <= CENTER_PITCH)
+                    return { code: 'CENTER', flag: null, label: 'Center' };
+                const left = yaw <= -TURN_YAW;
+                const right = yaw >= TURN_YAW;
+                const down = pitch <= -TURN_PITCH;
+                const up = pitch >= TURN_PITCH;
+                if (left && down)  return { code: 'DOWN_LEFT',  flag: null, label: 'Head tilted down-left' };
+                if (right && down) return { code: 'DOWN_RIGHT', flag: null, label: 'Head tilted down-right' };
+                if (left && up)    return { code: 'UP_LEFT',    flag: 'HEAD_POSE', label: 'Head tilted up-left' };
+                if (right && up)   return { code: 'UP_RIGHT',   flag: 'HEAD_POSE', label: 'Head tilted up-right' };
+                if (left)  return { code: 'LEFT',  flag: 'HEAD_POSE', label: 'Head turned left' };
+                if (right) return { code: 'RIGHT', flag: 'HEAD_POSE', label: 'Head turned right' };
+                if (down) return { code: 'DOWN', flag: null, label: 'Head tilted down' };
+                if (up)   return { code: 'UP', flag: 'HEAD_POSE', label: 'Head tilted up' };
                 return { code: 'CENTER', flag: null, label: 'Center' };
             },
 
@@ -2794,6 +2884,7 @@
 
                 const totalScore = selectedQuestions.length * MARKS_PER_QUESTION;
                 const percentage = Math.round((score / totalScore) * 100) || 0;
+                const timeSpent = Math.max(0, EXAM_DURATION_SECONDS - timeLeft);
 
                 this.disableExam();
 
@@ -2818,6 +2909,7 @@
                                 score: score,
                                 total: totalScore,
                                 percentage: percentage,
+                                time_spent: timeSpent,
                                 warnings: this.currentWarnings,
                                 question_count: selectedQuestions.length,
                                 termination_reason: reason
@@ -2845,6 +2937,7 @@
                                 score: score,
                                 total: totalScore,
                                 percentage: percentage,
+                                time_spent: timeSpent,
                                 warnings: this.currentWarnings,
                                 question_count: selectedQuestions.length,
                                 termination_reason: reason
@@ -3215,19 +3308,24 @@
                     const bannerTextEl = document.getElementById('warning-banner-text');
                     if (bannerEl && bannerTextEl) {
                         const flagsArr = a.active_flags ? Array.from(a.active_flags) : [];
-                        const allowedBanned = ['cell phone', 'clock', 'book', 'paper', 'smartwatch', 'phone'];
+                        // Book/notebook/paper/copy/register/journal all mapped to same category
+                        const BOOK_LABELS = new Set(['book','book_heuristic','notebook','textbook','copy','paper','register','journal','notepad','notes','binder','folder','document','magazine']);
+                        const allowedBanned = [
+                            'cell phone', 'phone', 'mobile phone', 'smartphone',
+                            'clock', 'smartwatch',
+                            ...Array.from(BOOK_LABELS)
+                        ];
                         const baseBanned = (m.banned_labels ? Array.from(m.banned_labels) : [])
                             .map(l => String(l || '').toLowerCase())
                             .filter(l => allowedBanned.includes(l));
                         const banned = baseBanned.length ? Array.from(new Set(baseBanned.map(l => {
-                            if (l === 'cell phone' || l === 'phone') return 'Cell Phone';
+                            if (l === 'cell phone' || l === 'phone' || l === 'mobile phone' || l === 'smartphone') return 'Phone';
                             if (l === 'clock' || l === 'smartwatch') return 'Smartwatch';
-                            if (l === 'book') return 'Book/Paper';
-                            if (l === 'paper') return 'Paper';
+                            if (BOOK_LABELS.has(l)) return 'Book/Notebook';
                             return l;
                         }))) : [];
                         
-                        // ── Gaze & Head Pose Tracking ──
+                        // ── Gaze & Head Tracking (GitHub reference) ──
                         const hasFace = Number(m.face_count || 0) > 0;
                         const gazeDir = hasFace ? warningSystem.classifyGazeDirection(m.gaze_yaw_deg, m.gaze_pitch_deg, m.yaw_deg) : null;
                         const nowTs = Date.now();
@@ -3240,14 +3338,34 @@
                                 warningSystem.gazeDirectionFrames += 1;
                             }
                             const heldMs = nowTs - (warningSystem.gazeDirectionSince || nowTs);
-                            // Stricter: ~0.7s persistence and at least 2 frames
-                            if (heldMs >= 700 && warningSystem.gazeDirectionFrames >= 2 && gazeDir.flag) {
+                            // ~0.8s persistence and at least 2 frames for faster left/right detection
+                            if (heldMs >= 800 && warningSystem.gazeDirectionFrames >= 2 && gazeDir.flag) {
                                 if (!flagsArr.includes(gazeDir.flag)) flagsArr.push(gazeDir.flag);
                             }
                         } else {
                             warningSystem.gazeDirection = null;
                             warningSystem.gazeDirectionSince = 0;
                             warningSystem.gazeDirectionFrames = 0;
+                        }
+
+                        // ── Head pose direction (left/right/down) ──
+                        const headPoseDir = hasFace ? warningSystem.classifyHeadPoseDirection(m.yaw_deg, m.pitch_deg) : null;
+                        if (hasFace && headPoseDir && headPoseDir.code !== 'CENTER') {
+                            if (warningSystem.headPoseDirection !== headPoseDir.code) {
+                                warningSystem.headPoseDirection = headPoseDir.code;
+                                warningSystem.headPoseDirectionSince = nowTs;
+                                warningSystem.headPoseDirectionFrames = 1;
+                            } else {
+                                warningSystem.headPoseDirectionFrames += 1;
+                            }
+                            const heldHeadMs = nowTs - (warningSystem.headPoseDirectionSince || nowTs);
+                            if (heldHeadMs >= 3000 && warningSystem.headPoseDirectionFrames >= 5 && headPoseDir.flag) {
+                                if (!flagsArr.includes(headPoseDir.flag)) flagsArr.push(headPoseDir.flag);
+                            }
+                        } else {
+                            warningSystem.headPoseDirection = null;
+                            warningSystem.headPoseDirectionSince = 0;
+                            warningSystem.headPoseDirectionFrames = 0;
                         }
 
                         // ── Head movement jitter detection ──
@@ -3291,7 +3409,19 @@
 
                         // ── Multiple Faces ──
                         if (m.face_count > 1) {
-                            flagsArr.push('MULTIPLE_FACES');
+                            if (warningSystem.multipleFaceSince) {
+                                warningSystem.multipleFaceFrames = (warningSystem.multipleFaceFrames || 0) + 1;
+                            } else {
+                                warningSystem.multipleFaceSince = nowTs;
+                                warningSystem.multipleFaceFrames = 1;
+                            }
+                            const heldMultiMs = nowTs - (warningSystem.multipleFaceSince || nowTs);
+                            if (heldMultiMs >= 1200 && warningSystem.multipleFaceFrames >= 2) {
+                                flagsArr.push('MULTIPLE_FACES');
+                            }
+                        } else {
+                            warningSystem.multipleFaceSince = 0;
+                            warningSystem.multipleFaceFrames = 0;
                         }
 
                         const gazeFlags = ['GAZE_LEFT', 'GAZE_RIGHT', 'GAZE_UP', 'GAZE_DOWN', 'GAZE_UP_LEFT', 'GAZE_UP_RIGHT', 'GAZE_DOWN_LEFT', 'GAZE_DOWN_RIGHT'];
@@ -3301,8 +3431,19 @@
                         let bannerMsg = "";
 
                         if (banned.length > 0) {
-                            bannerMsg = `Warning: Prohibited object detected (${banned[0]})`;
-                            bannerActive = true;
+                            const bannedKey = banned.join('|');
+                            if (warningSystem.lastBannedKey !== bannedKey) {
+                                warningSystem.lastBannedKey = bannedKey;
+                                warningSystem.bannedSince = nowTs;
+                                warningSystem.bannedFrames = 1;
+                            } else {
+                                warningSystem.bannedFrames = (warningSystem.bannedFrames || 0) + 1;
+                            }
+                            const heldBannedMs = nowTs - (warningSystem.bannedSince || nowTs);
+                            if (heldBannedMs >= 1200 && warningSystem.bannedFrames >= 2) {
+                                bannerMsg = `⚠️ WARNING: Prohibited item detected (${banned[0]}) — remove it immediately!`;
+                                bannerActive = true;
+                            }
                         } else if (flagsArr.includes('MULTIPLE_FACES')) {
                             bannerMsg = "Warning: Multiple faces detected!";
                             bannerActive = true;
@@ -3315,8 +3456,12 @@
                         } else if (flagsArr.includes('HEAD_MOVEMENT')) {
                             bannerMsg = "Warning: Keep your head still and face the screen";
                             bannerActive = true;
+                        } else if (flagsArr.includes('HEAD_POSE')) {
+                            const hpDir2 = warningSystem.headPoseDirection || 'away';
+                            bannerMsg = `⚠️ Warning: Head turned (${String(hpDir2).toLowerCase()}) — please face the screen`;
+                            bannerActive = true;
                         } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 3000)) {
-                            bannerMsg = "Warning: Human voice detected in room";
+                            bannerMsg = "⚠️ Warning: Voice detected near microphone";
                             bannerActive = true;
                         } else if (flagsArr.includes('NOT_FORWARD')) {
                             bannerMsg = "Warning: Please look forward at the screen";
@@ -3336,26 +3481,32 @@
                             if (!warningSystem.warningModalOpen && Date.now() > warningSystem.acknowledgeGraceUntil) {
                                 // ── Critical Warnings (Immediate) ──
                                 if (banned.length > 0) {
-                                    warningSystem.addWarning({ type: 'PROHIBITED_OBJECT', details: `Prohibited object detected: ${banned[0]}`, severity: 'high', student_id: studentId });
+                                    warningSystem.addWarning({ type: 'PROHIBITED_OBJECT', details: `Prohibited item detected: ${banned[0]}`, severity: 'high', student_id: studentId });
                                 } else if (flagsArr.includes('MULTIPLE_FACES')) {
                                     warningSystem.addWarning({ type: 'MULTIPLE_FACES', details: 'Multiple people detected in camera feed', severity: 'high', student_id: studentId });
-                                } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 2000)) {
-                                    warningSystem.addWarning({ type: 'VOICE_DETECTED', details: 'Human voice detected in room', severity: 'medium', student_id: studentId });
-                                    warningSystem.lastVoiceAlertAt = 0; // Reset after modal trigger
-                                }
-                                // ── Passive Warnings (Persistence Throttled) ──
-                                else if (flagsArr.includes('FACE_OBSCURED')) {
-                                    warningSystem.addWarning({ type: 'FACE_OBSCURED', details: 'Face appears covered/obscured', severity: 'high', student_id: studentId });
-                                    warningSystem.faceObscuredFrames = 0;
                                 } else if (flagsArr.includes('NO_FACE')) {
                                     warningSystem.addWarning({ type: 'NO_FACE', details: 'No face detected for several seconds', severity: 'high', student_id: studentId });
                                     warningSystem.noFaceFrames = 0;
-                                } else if (flagsArr.includes('NOT_FORWARD')) {
-                                    warningSystem.addWarning({ type: 'DISTRACTION', details: 'Please look directly at the exam screen', severity: 'medium', student_id: studentId });
-                                } else if (flagsArr.includes('HEAD_MOVEMENT')) {
+                                } else if (flagsArr.includes('voice_detected') || (Date.now() - (warningSystem.lastVoiceAlertAt || 0) < 2000)) {
+                                    warningSystem.addWarning({ type: 'VOICE_DETECTED', details: 'Voice detected near microphone during exam', severity: 'medium', student_id: studentId });
+                                    warningSystem.lastVoiceAlertAt = 0;
+                                }
+                                // ── Passive Warnings (Persistence Throttled) ──
+                                else if (flagsArr.includes('HEAD_MOVEMENT')) {
                                     warningSystem.addWarning({ type: 'HEAD_MOVEMENT', details: 'Excessive head movement detected', severity: 'medium', student_id: studentId });
                                     warningSystem.headMotionStreak = 0;
+                                } else if (flagsArr.includes('HEAD_POSE')) {
+                                    // HEAD POSE: separate from gaze — issues its own warning
+                                    const hpLabel = warningSystem.headPoseDirection
+                                        ? `Head turned ${String(warningSystem.headPoseDirection).toLowerCase()}`
+                                        : 'Head turned away from screen';
+                                    warningSystem.addWarning({ type: 'HEAD_POSE', details: hpLabel, severity: 'medium', student_id: studentId });
+                                    // Reset head pose tracking after issuing warning
+                                    warningSystem.headPoseDirection = null;
+                                    warningSystem.headPoseDirectionSince = 0;
+                                    warningSystem.headPoseDirectionFrames = 0;
                                 } else if (activeGazeFlag) {
+                                    // GAZE: separate from head — issues its own warning
                                     warningSystem.addWarning({ type: 'DISTRACTION', details: warningSystem.gazeBannerForFlag(activeGazeFlag).replace('Warning: ', ''), severity: 'medium', student_id: studentId });
                                     warningSystem.gazeDirection = null;
                                     warningSystem.gazeDirectionFrames = 0;
@@ -3662,12 +3813,12 @@
             started: false,
             cooldownUntil: 0,
             speakingSince: 0,
-            minSpeechMs: 160,           // sustained speech trigger (normal)
-            longSpeechMs: 360,          // long continuous speech trigger
+            minSpeechMs: 200,           // sustained speech trigger — reasonable gap to avoid noise spikes
+            longSpeechMs: 380,          // long continuous speech trigger
             cumulativeSpeechMs: 0,      // rolling talk-time bucket
             bucketWindowMs: 12000,
             bucketResetAt: 0,
-            minRms: 0.0018,
+            minRms: 0.05,               // VERY WEAK voice detection: requires loud voice or very close speech to trigger
             noiseFloor: null,
             micWarnCooldownUntil: 0,
             audioTrack: null,
@@ -3675,7 +3826,7 @@
             calibrationUntil: 0,
             voicedFrames: 0,
             missFrames: 0,
-            calibrationMs: 600,
+            calibrationMs: 800,         // slightly longer calibration for better baseline
             voiceTestActive: false,
             voiceTestDetected: false,
             // Removed local VAD loop for Phase 15
@@ -3826,14 +3977,22 @@
                     const dominantHz = domIdx * hzPerBin;
                     const inCalibration = Date.now() < this.calibrationUntil;
                     const energyGate = rms >= dynRmsThreshold;
-                    const speechBandGate = speechRatio >= 0.08 && speechBand >= 3;
-                    const frequencyGate = dominantHz >= 50 && dominantHz <= 4500;
-                    const nonWindGate = windRatio <= 0.65;
-                    const zcrGate = zcr >= 0.0005 && zcr <= 0.55;
-                    const whisperGate = (rms >= (dynRmsThreshold * 0.9)) && (speechRatio >= 0.14) && frequencyGate && nonWindGate;
-                    const backupVoiceGate = (rms >= (dynRmsThreshold * 1.05)) && (speechRatio >= 0.07);
-                    const rmsBurst = rms >= (dynRmsThreshold * 1.9);
-                    const looksLikeHumanVoice = (!inCalibration) && ((energyGate && speechBandGate && frequencyGate && nonWindGate && zcrGate) || whisperGate || backupVoiceGate || rmsBurst);
+                    // Moderate speech band ratio — not too strict (0.12 avoids noise yet allows whispers)
+                    const speechBandGate = speechRatio >= 0.28 && speechBand >= 10;
+                    const frequencyGate = dominantHz >= 80 && dominantHz <= 4000;
+                    const nonWindGate = windRatio <= 0.40;
+                    const zcrGate = zcr >= 0.001 && zcr <= 0.50;
+                    // Whisper gate: moderate threshold (0.18) so quiet speech still detected
+                    const whisperGate = (rms >= (dynRmsThreshold * 0.92)) && (speechRatio >= 0.35) && frequencyGate && nonWindGate && zcrGate;
+                    // NOTE: backupVoiceGate REMOVED — it fired on any RMS 5% above noise (catches air/fans)
+                    // NOTE: standalone rmsBurst trigger REMOVED — loud non-voice sounds would fire it
+                    const rmsBurst = rms >= (dynRmsThreshold * 2.0);
+                    // looksLikeHumanVoice: must pass ALL main gates, OR whisperGate, OR main gates + rmsBurst
+                    const looksLikeHumanVoice = (!inCalibration) && (
+                        (energyGate && speechBandGate && frequencyGate && nonWindGate && zcrGate) ||
+                        whisperGate ||
+                        (energyGate && speechBandGate && frequencyGate && nonWindGate && rmsBurst)
+                    );
 
                     const now = Date.now();
                     if (now - this.lastAudioDebugAt >= 2000) {

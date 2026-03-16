@@ -96,6 +96,17 @@ const MONITORED_OBJECT_LABELS = Array.from(/* @__PURE__ */ new Set([...BANNED_LA
 const LEFT_EYE = [33, 160, 158, 133, 153, 144];
 const RIGHT_EYE = [362, 385, 387, 263, 373, 380];
 const YOLO_INPUT_SIZE = 640;
+const NIQAB_MODE_ENABLED = true;
+const EYE_PAIR_MIN_SEPARATION = 40;
+const EYE_PAIR_MAX_SEPARATION = 200;
+const GAZE_HORIZONTAL_THRESHOLD = 0.32;
+const GAZE_VERTICAL_DOWN_THRESHOLD = 0.34;
+const GAZE_VERTICAL_UP_THRESHOLD = 0.24;
+const GAZE_HORIZONTAL_SUSTAIN_MS = 1500;
+const GAZE_VERTICAL_SUSTAIN_MS = 2e3;
+const BOOK_LABELS = ["book", "notebook", "paper", "magazine", "journal", "document", "folder", "textbook", "copy", "register"];
+const BOOK_CONFIDENCE_THRESHOLD = 0.3;
+const BOOK_AREA_MIN_RATIO = 0.02;
 const LIGHTING_MIN_SCORE = 0.52;
 const OBJECT_STABLE_FRAMES = 1;
 const OBJECT_EMA_ALPHA = 0.34;
@@ -106,22 +117,24 @@ const ACCESSORY_EMA_ALPHA = 0.35;
 const LIGHTING_EMA_ALPHA = 0.28;
 const CLASS_CONF_THRESHOLDS = {
   person: 0.5,
-  "cell phone": 0.15,
-  "book": 0.15,
+  "cell phone": 0.40, // Increased to 40% to prevent false alarms from hands/background objects
+  // Book/notebook/journal/register: aggressively low confidence to catch tilted or back-side books
+  "book": 0.10,
   "clock": 0.2,
   "paper": 0.15
 };
 const MIN_AREA_RATIO_BY_LABEL = {
   person: 0.01,
   "cell phone": 1e-3,
-  "book": 1e-3,
+  // Aggressively low min area to detect parts of books or tilted ones
+  "book": 5e-4,
   "clock": 12e-4,
   "paper": 1e-3
 };
 const MIN_SHORT_SIDE_PX_BY_LABEL = {
   person: 40,
   "cell phone": 8,
-  book: 15,
+  book: 10,
   clock: 12,
   paper: 12
 };
@@ -154,6 +167,16 @@ class ProctorCore {
     __publicField(this, "scratchCtx");
     __publicField(this, "frameCanvas");
     __publicField(this, "frameCtx");
+    __publicField(this, "eyeScratch");
+    __publicField(this, "eyeScratchCtx");
+    __publicField(this, "lastEyeApiAt", 0);
+    __publicField(this, "lastEyeApiPairs", 0);
+    __publicField(this, "gazeEmaH", 0.5);
+    __publicField(this, "gazeEmaV", 0.5);
+    __publicField(this, "gazeStartH", null);
+    __publicField(this, "gazeStartV", null);
+    __publicField(this, "gazeInitAt", Date.now());
+    __publicField(this, "bookHeuristicStreak", 0);
     __publicField(this, "yoloChwBuffer");
     __publicField(this, "objectTemporalState", /* @__PURE__ */ new Map());
     __publicField(this, "accessoryTemporalState", {
@@ -241,6 +264,13 @@ class ProctorCore {
     const detections = yoloOut.detections;
     const lighting = this.stabilizeLightingSignal(yoloOut.lighting);
     const face = this.runFaceSignals(source, now, vw, vh);
+    // Geometry-based book heuristic (desk region)
+    const bookHeuristic = this.detectDeskBookHeuristic(vw, vh);
+    if (bookHeuristic) {
+      this.bookHeuristicStreak = Math.min(10, this.bookHeuristicStreak + 1);
+    } else {
+      this.bookHeuristicStreak = 0;
+    }
     const lightingVisibility = this.assessLightingVisibilityCompromise(lighting, detections, face, vw, vh);
     const personCount = detections.filter((d) => d.label === "person").length;
     const stabilizedLabels = this.stabilizeObjectLabels(detections);
@@ -257,6 +287,9 @@ class ProctorCore {
     const rawBannedLabels = Array.from(
       /* @__PURE__ */ new Set([...stabilizedLabels.banned, ...stabilizedLabels.accessory, ...heuristicAccessoryLabels])
     );
+    if (this.bookHeuristicStreak >= 1) {
+      rawBannedLabels.push("book_heuristic");
+    }
     const labelDisplayMap = {
       clock: "smartwatch",
       book: "book/paper",
@@ -509,15 +542,148 @@ class ProctorCore {
     const areaB = Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
     return interArea / Math.max(areaA + areaB - interArea, 1e-6);
   }
+  detectEyePairsLocal(source, frameW, frameH) {
+    if (!NIQAB_MODE_ENABLED) return 0;
+    if (!this.eyeScratch) {
+      this.eyeScratch = document.createElement("canvas");
+      this.eyeScratchCtx = this.eyeScratch.getContext("2d");
+    }
+    const w = 200;
+    const h = Math.max(80, Math.round(frameH * (w / Math.max(frameW, 1))));
+    this.eyeScratch.width = w;
+    this.eyeScratch.height = h;
+    this.eyeScratchCtx.drawImage(source, 0, 0, w, h);
+    const data = this.eyeScratchCtx.getImageData(0, 0, w, h).data;
+    const yStart = Math.floor(h * 0.2);
+    const yEnd = Math.floor(h * 0.6);
+    const colEnergy = new Array(w).fill(0);
+    let samples = 0;
+    for (let y = yStart; y < yEnd; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = (y * w + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (lum < 90) {
+          colEnergy[x] += (90 - lum);
+        }
+        samples++;
+      }
+    }
+    const smoothed = colEnergy.map((_, i) => {
+      let sum = 0;
+      let count = 0;
+      for (let k = -3; k <= 3; k++) {
+        const idx = i + k;
+        if (idx >= 0 && idx < w) {
+          sum += colEnergy[idx];
+          count++;
+        }
+      }
+      return count ? sum / count : 0;
+    });
+    let peaks = [];
+    const meanEnergy = smoothed.reduce((a, b) => a + b, 0) / Math.max(smoothed.length, 1);
+    for (let i = 2; i < smoothed.length - 2; i++) {
+      const v = smoothed[i];
+      if (v > meanEnergy * 1.4 && v > smoothed[i - 1] && v > smoothed[i + 1]) {
+        peaks.push({ x: i, v });
+      }
+    }
+    if (peaks.length < 2) return 0;
+    peaks = peaks.sort((a, b) => b.v - a.v).slice(0, 4).sort((a, b) => a.x - b.x);
+    for (let i = 0; i < peaks.length - 1; i++) {
+      const sep = Math.abs(peaks[i + 1].x - peaks[i].x);
+      if (sep >= EYE_PAIR_MIN_SEPARATION && sep <= EYE_PAIR_MAX_SEPARATION) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  fetchEyePairsFromServer(source) {
+    if (!NIQAB_MODE_ENABLED) return;
+    const now = Date.now();
+    if (now - this.lastEyeApiAt < 900) return;
+    this.lastEyeApiAt = now;
+    if (!this.eyeScratch) {
+      this.eyeScratch = document.createElement("canvas");
+      this.eyeScratchCtx = this.eyeScratch.getContext("2d");
+    }
+    const w = 320;
+    const h = 240;
+    this.eyeScratch.width = w;
+    this.eyeScratch.height = h;
+    this.eyeScratchCtx.drawImage(source, 0, 0, w, h);
+    const jpeg = this.eyeScratch.toDataURL("image/jpeg", 0.5);
+    fetch("/api/detect-eyes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: jpeg })
+    }).then((r) => r.json()).then((resp) => {
+      if (resp && typeof resp.eye_pairs === "number") {
+        this.lastEyeApiPairs = resp.eye_pairs;
+      }
+    }).catch(() => {
+    });
+  }
+  detectEyePairs(source, frameW, frameH) {
+    if (!NIQAB_MODE_ENABLED) return 0;
+    const localPairs = this.detectEyePairsLocal(source, frameW, frameH);
+    if (localPairs === 0) {
+      this.fetchEyePairsFromServer(source);
+    }
+    return Math.max(localPairs, this.lastEyeApiPairs || 0);
+  }
+  detectDeskBookHeuristic(frameW, frameH) {
+    try {
+      const regionTop = Math.floor(frameH * 0.4);
+      const regionH = frameH - regionTop;
+      const regionW = frameW;
+      const targetW = 160;
+      const targetH = Math.max(80, Math.round(regionH * (targetW / Math.max(regionW, 1))));
+      if (!this.eyeScratch) {
+        this.eyeScratch = document.createElement("canvas");
+        this.eyeScratchCtx = this.eyeScratch.getContext("2d");
+      }
+      this.eyeScratch.width = targetW;
+      this.eyeScratch.height = targetH;
+      this.eyeScratchCtx.drawImage(this.frameCanvas, 0, regionTop, regionW, regionH, 0, 0, targetW, targetH);
+      const data = this.eyeScratchCtx.getImageData(0, 0, targetW, targetH).data;
+      const len = data.length / 4;
+      let sum = 0;
+      let sumSq = 0;
+      for (let i = 0; i < len; i++) {
+        const idx = i * 4;
+        const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+        sum += lum;
+        sumSq += lum * lum;
+      }
+      const mean = sum / Math.max(1, len);
+      const variance = sumSq / Math.max(1, len) - mean * mean;
+      const areaRatio = regionW * regionH / Math.max(1, frameW * frameH);
+      return mean > 105 && mean < 235 && variance < 1400 && areaRatio >= BOOK_AREA_MIN_RATIO;
+    } catch (e) {
+      return false;
+    }
+  }
   runFaceSignals(source, timeMs, frameW, frameH) {
     if (!this.faceLandmarker) {
       return this.emptyFace();
     }
     const result = this.faceLandmarker.detectForVideo(source, timeMs);
     const faces = result.faceLandmarks;
+    let faceCount = faces ? faces.length : 0;
+    let eyePairs = 0;
+    if ((!faces || faceCount <= 1) && NIQAB_MODE_ENABLED) {
+      eyePairs = this.detectEyePairs(source, frameW, frameH);
+    }
+    const effectiveFaceCount = Math.max(faceCount, eyePairs);
     if (!faces || faces.length === 0) {
       this.decayAccessoryTemporalState();
-      return this.emptyFace();
+      const empty = this.emptyFace();
+      empty.face_count = effectiveFaceCount;
+      return empty;
     }
     const lm = faces[0];
     const yaw = this.estimateYaw(lm);
@@ -529,7 +695,7 @@ class ProctorCore {
     const gaze = this.estimateGazeSignals(lm);
     const accessory = this.stabilizeAccessorySignal(this.detectEarAccessories(lm, frameW, frameH));
     return {
-      face_count: faces.length,
+      face_count: effectiveFaceCount,
       yaw_deg: yaw,
       pitch_deg: pitch,
       roll_deg: roll,
@@ -537,6 +703,8 @@ class ProctorCore {
       gaze_offset: gaze.offset,
       gaze_yaw_deg: gaze.yaw_deg,
       gaze_pitch_deg: gaze.pitch_deg,
+      gaze_horiz_ratio: gaze.horiz_ratio,
+      gaze_vert_ratio: gaze.vert_ratio,
       accessory
     };
   }
@@ -629,7 +797,7 @@ class ProctorCore {
   }
   estimateGazeSignals(points) {
     if (points.length < 478) {
-      return { offset: null, yaw_deg: null, pitch_deg: null };
+      return { offset: null, yaw_deg: null, pitch_deg: null, horiz_ratio: null, vert_ratio: null };
     }
     const leftOuter = points[33].x;
     const leftInner = points[133].x;
@@ -648,18 +816,43 @@ class ProctorCore {
     const leftRatioV = this.safeRatio(leftIrisY - leftTop, leftBottom - leftTop);
     const rightRatioV = this.safeRatio(rightIrisY - rightTop, rightBottom - rightTop);
     if (leftRatio === null || rightRatio === null || leftRatioV === null || rightRatioV === null) {
-      return { offset: null, yaw_deg: null, pitch_deg: null };
+      return { offset: null, yaw_deg: null, pitch_deg: null, horiz_ratio: null, vert_ratio: null };
     }
     const yawRatio = ((leftRatio - 0.5) * 2 + (rightRatio - 0.5) * 2) / 2;
     const pitchRatio = ((leftRatioV - 0.5) * 2 + (rightRatioV - 0.5) * 2) / 2;
     const yawDeg = this.clamp(yawRatio * 38, -40, 40);
     const pitchDeg = this.clamp(-pitchRatio * 28, -30, 30);
     const offset = this.clamp((Math.abs(yawRatio) * 0.75 + Math.abs(pitchRatio) * 0.55) * 1.4, 0, 1.5);
+    const horizRatio = this.clamp(yawRatio * 0.5 + 0.5, 0, 1);
+    const vertRatio = this.clamp(pitchRatio * 0.5 + 0.5, 0, 1);
     return {
       offset,
       yaw_deg: yawDeg,
-      pitch_deg: pitchDeg
+      pitch_deg: pitchDeg,
+      horiz_ratio: horizRatio,
+      vert_ratio: vertRatio
     };
+  }
+  estimateEyeOnlyGaze(points) {
+    if (points.length < 374) return { offset: null, yaw_deg: null, pitch_deg: null };
+    const leftOuter = points[33].x;
+    const leftInner = points[133].x;
+    const rightInner = points[362].x;
+    const rightOuter = points[263].x;
+    const leftTop = points[159] ? points[159].y : points[33].y;
+    const leftBottom = points[145] ? points[145].y : points[33].y;
+    const rightTop = points[386] ? points[386].y : points[362].y;
+    const rightBottom = points[374] ? points[374].y : points[362].y;
+    const leftCenter = (leftInner + leftOuter) / 2;
+    const rightCenter = (rightInner + rightOuter) / 2;
+    const yawRatio = this.safeRatio((leftCenter - leftOuter), leftInner - leftOuter) - this.safeRatio((rightOuter - rightCenter), rightOuter - rightInner);
+    const pitchRatio = this.safeRatio((leftBottom - leftTop), Math.max(leftBottom - leftTop, 1e-6));
+    const horizRatio = this.clamp((yawRatio || 0) * 0.5 + 0.5, 0, 1);
+    const vertRatio = this.clamp(pitchRatio || 0, 0, 1);
+    const yawDeg = this.clamp((horizRatio - 0.5) * 80, -35, 35);
+    const pitchDeg = this.clamp((vertRatio - 0.5) * -40, -20, 20);
+    const offset = this.clamp((Math.abs(yawDeg) / 40 + Math.abs(pitchDeg) / 25), 0, 1.5);
+    return { offset, yaw_deg: yawDeg, pitch_deg: pitchDeg, horiz_ratio: horizRatio, vert_ratio: vertRatio };
   }
   detectEarAccessories(points, frameW, frameH) {
     if (points.length < 478) {
@@ -944,6 +1137,25 @@ class ProctorCore {
     const roll = face.roll_deg ?? 0;
     const gazeYaw = face.gaze_yaw_deg ?? 0;
     const gazePitch = face.gaze_pitch_deg ?? 0;
+    const gazeHorizRatio = face.gaze_horiz_ratio ?? 0.5;
+    const gazeVertRatio = face.gaze_vert_ratio ?? 0.5;
+    const now = Date.now();
+    const allowGaze = now - this.gazeInitAt > 1200;
+    // Smooth gaze ratios
+    this.gazeEmaH = this.gazeEmaH * 0.6 + gazeHorizRatio * 0.4;
+    this.gazeEmaV = this.gazeEmaV * 0.6 + gazeVertRatio * 0.4;
+    const horizDev = Math.abs(this.gazeEmaH - 0.5);
+    const vertDevDown = this.gazeEmaV - 0.5;
+    const vertDevUp = 0.5 - this.gazeEmaV;
+    const horizExceeded = horizDev > GAZE_HORIZONTAL_THRESHOLD;
+    const vertDownExceeded = vertDevDown > GAZE_VERTICAL_DOWN_THRESHOLD;
+    const vertUpExceeded = vertDevUp > GAZE_VERTICAL_UP_THRESHOLD;
+    if (!horizExceeded) this.gazeStartH = null;
+    if (!vertDownExceeded && !vertUpExceeded) this.gazeStartV = null;
+    if (horizExceeded && !this.gazeStartH) this.gazeStartH = now;
+    if ((vertDownExceeded || vertUpExceeded) && !this.gazeStartV) this.gazeStartV = now;
+    const horizSustained = this.gazeStartH && now - this.gazeStartH >= GAZE_HORIZONTAL_SUSTAIN_MS;
+    const vertSustained = this.gazeStartV && now - this.gazeStartV >= GAZE_VERTICAL_SUSTAIN_MS;
     if (Math.abs(yaw) > 15) {
       risk += 10;
       reasons.push("Head yaw off-axis");
@@ -956,11 +1168,11 @@ class ProctorCore {
       risk += 6;
       reasons.push("Head roll tilt");
     }
-    if (Math.abs(gazeYaw) > 12) {
+    if (allowGaze && horizSustained) {
       risk += 11;
       reasons.push("Eye gaze horizontal drift");
     }
-    if (Math.abs(gazePitch) > 10) {
+    if (allowGaze && vertSustained) {
       risk += 9;
       reasons.push("Eye gaze vertical drift");
     }

@@ -33,7 +33,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 
 from flask import (
-    Flask, render_template, request, jsonify, redirect, url_for, flash, Response, send_from_directory, abort, session, send_file
+    Flask, render_template, request, jsonify, redirect, url_for, flash, Response, send_from_directory, abort, session, send_file, make_response
 )
 
 try:
@@ -384,6 +384,51 @@ def _get_active_session_id(student_id):
     except Exception:
         return 0
 
+def _get_latest_session_id(student_id):
+    """Retrieve the most recent session ID for a student (any status), returning 0 if none found."""
+    try:
+        cur = mysql.connection.cursor()
+        cur.execute("""
+            SELECT SessionID
+            FROM exam_sessions
+            WHERE StudentID=%s
+            ORDER BY StartTime DESC, SessionID DESC
+            LIMIT 1
+        """, (student_id,))
+        row = cur.fetchone()
+        cur.close()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+
+def _get_active_or_latest_session_id(student_id):
+    """Prefer IN_PROGRESS session; fallback to the latest session for the student."""
+    sid = _get_active_session_id(student_id)
+    if sid:
+        return sid
+    return _get_latest_session_id(student_id)
+
+def _ensure_session_id(student_id, status='IN_PROGRESS', start_dt=None):
+    """Create a fallback session if none exists (best-effort). Returns new SessionID or 0."""
+    try:
+        cur = mysql.connection.cursor()
+        if start_dt is not None:
+            cur.execute("""
+                INSERT INTO exam_sessions (StudentID, StartTime, Status)
+                VALUES (%s, %s, %s)
+            """, (student_id, start_dt, status))
+        else:
+            cur.execute("""
+                INSERT INTO exam_sessions (StudentID, StartTime, Status)
+                VALUES (%s, NOW(), %s)
+            """, (student_id, status))
+        mysql.connection.commit()
+        sid = cur.lastrowid
+        cur.close()
+        return sid
+    except Exception:
+        return 0
+
 def _build_stream_placeholder(student_id, message):
     """Build a static placeholder frame for M-JPEG stream when real video isn't available."""
     if np is None or cv2 is None:
@@ -574,6 +619,16 @@ student_stale_violation_at = {}
 student_stale_violation_lock = threading.Lock()
 runtime_warning_state = {}
 runtime_warning_state_lock = threading.Lock()
+# Track active student socket session ids for targeted emits
+_student_socket_sids = {}
+_student_socket_sids_lock = threading.Lock()
+# Throttle server-originated object alerts per student/label
+# Throttle server-originated object alerts per student/label
+_last_object_alert_at = {}
+# Track latest v2 telemetry timestamps to avoid double-processing v1/v2
+_last_v2_telemetry_at = {}
+# Cache for admin-active-students API (10s TTL)
+_student_cache = {'data': None, 'ts': 0}
 # Track which students have already received a 'feed_started' emit so we only send it once per session
 _feed_started_for = set()
 _feed_started_lock = threading.Lock()
@@ -743,6 +798,106 @@ def _get_runtime_warning_state(student_id):
             'start_time': rec.get('start_time')
         }
 
+# Friendly labels for UI rendering
+VIOLATION_LABELS = {
+    'TAB_SWITCH': 'Tab switching',
+    'PROHIBITED_SHORTCUT': 'Prohibited shortcut',
+    'PROHIBITED_OBJECT': 'Prohibited object',
+    'MULTIPLE_FACES': 'Multiple faces',
+    'NO_FACE': 'No face detected',
+    'EYES_CLOSED': 'Eyes closed',
+    'DISTRACTION': 'Distraction',
+    'HEAD_MOVEMENT': 'Head movement',
+    'HEAD_DOWN': 'Head down',
+    'HEAD_POSE': 'Head pose',
+    'GAZE_AWAY': 'Gaze away',
+    'VOICE_DETECTED': 'Voice detected',
+    'IDENTITY_MISMATCH': 'Identity mismatch',
+    'TERMINATED_BY_ADMIN': 'Terminated by admin',
+}
+
+def _friendly_violation_type(vtype):
+    key = str(vtype or 'UNKNOWN').upper()
+    return VIOLATION_LABELS.get(key, key.replace('_', ' ').title())
+
+def _maybe_issue_object_warning(student_id, student_name, label):
+    """Server-side object detection -> warning + student notification (book/paper)."""
+    sid = str(student_id)
+    lbl = str(label or '').strip().lower()
+    if not sid or not lbl:
+        return
+    now = time.time()
+    key = f"{sid}:{lbl}"
+    last = float(_last_object_alert_at.get(key, 0.0))
+    # Small throttle to avoid repeated warnings on every frame
+    if now - last < 0.8:
+        return
+    _last_object_alert_at[key] = now
+
+    details = f"Prohibited item detected: {lbl}"
+    target_room = f"student:{sid}"
+    try:
+        with _student_socket_sids_lock:
+            target_sid = _student_socket_sids.get(sid)
+    except Exception:
+        target_sid = None
+    # Ensure warning_system student initialized
+    if warning_system:
+        if sid not in warning_system.warnings:
+            warning_system.initialize_student(sid, student_name or f"Student {sid}")
+        pre = warning_system.get_warnings(sid)
+        warning_system.add_warning(sid, 'PROHIBITED_OBJECT', details, emit_to_student=True)
+        post = warning_system.get_warnings(sid)
+        if post > pre:
+            _record_runtime_warning(sid, student_name, 'PROHIBITED_OBJECT', details)
+        # Push a direct UI warning to student + admin for visibility
+        if socketio:
+            payload = {
+                'student_id': sid,
+                'label': lbl,
+                'details': details,
+                'total_warnings': post
+            }
+            target = target_sid or target_room
+            socketio.emit('server_object_detected', payload, namespace='/student', to=target)
+            socketio.emit('server_object_detected', payload, namespace='/admin')
+            violation_payload = {
+                'student_id': sid,
+                'student_name': student_name,
+                'total_warnings': post,
+                'violation': {'type': 'PROHIBITED_OBJECT', 'details': details},
+                'type': 'PROHIBITED_OBJECT',
+                'details': details,
+                'source': 'server'
+            }
+            target = target_sid or target_room
+            socketio.emit('student_violation', violation_payload, namespace='/student', to=target)
+            socketio.emit('student_violation', violation_payload, namespace='/admin')
+    else:
+        count, _ = _record_runtime_warning(sid, student_name, 'PROHIBITED_OBJECT', details)
+        if socketio:
+            payload = {
+                'student_id': sid,
+                'label': lbl,
+                'details': details,
+                'total_warnings': count
+            }
+            target = target_sid or target_room
+            socketio.emit('server_object_detected', payload, namespace='/student', to=target)
+            socketio.emit('server_object_detected', payload, namespace='/admin')
+            violation_payload = {
+                'student_id': sid,
+                'student_name': student_name,
+                'total_warnings': count,
+                'violation': {'type': 'PROHIBITED_OBJECT', 'details': details},
+                'type': 'PROHIBITED_OBJECT',
+                'details': details,
+                'source': 'server'
+            }
+            target = target_sid or target_room
+            socketio.emit('student_violation', violation_payload, namespace='/student', to=target)
+            socketio.emit('student_violation', violation_payload, namespace='/admin')
+
 def _reset_exam_runtime_state(student_id, started_at_ms=None, student_name=None):
     sid = str(student_id)
     with runtime_warning_state_lock:
@@ -757,8 +912,47 @@ def _reset_exam_runtime_state(student_id, started_at_ms=None, student_name=None)
     if warning_system:
         warning_system.reset_student(sid)
 
-def _end_exam_runtime_state(student_id):
-    """Remove student from live monitoring state and reset warning cache."""
+def write_violation_async(student_id, session_id, vtype, details):
+    """Non-blocking violation insert to keep telemetry path fast."""
+    def _task():
+        try:
+            with app.app_context():
+                sid = int(session_id or 0) if session_id else 0
+                if not sid:
+                    sid = int(_get_active_or_latest_session_id(student_id) or 0)
+                if not sid:
+                    # Last resort: create a session so violations can be persisted.
+                    sid = int(_ensure_session_id(student_id, status='IN_PROGRESS') or 0)
+                if not sid:
+                    return
+                vtype_norm = str(vtype or 'UNKNOWN').upper()
+                details_norm = str(details or '')[:500]
+                cur = mysql.connection.cursor()
+                cur.execute("""
+                    INSERT INTO violations (StudentID, SessionID, ViolationType, Details, Timestamp)
+                    VALUES (%s, %s, %s, %s, NOW())
+                """, (student_id, sid, vtype_norm, details_norm))
+                mysql.connection.commit()
+                cur.close()
+        except Exception as e:
+            logger.error(f"Violation write failed for student {student_id}: {e}")
+    try:
+        if EVENTLET_AVAILABLE:
+            eventlet.spawn(_task)
+        else:
+            threading.Thread(target=_task, daemon=True).start()
+    except Exception as e:
+        logger.error(f"Failed to schedule violation write: {e}")
+
+# Wire violation writer into warning system for persistence/flush
+try:
+    if warning_system:
+        warning_system.violation_writer = write_violation_async
+except Exception:
+    pass
+
+def _end_exam_runtime_state(student_id, clear_warning_cache=True):
+    """Remove student from live monitoring state and optionally reset warning cache."""
     sid = str(student_id)
     with active_exam_students_lock:
         active_exam_students.discard(sid)
@@ -766,12 +960,13 @@ def _end_exam_runtime_state(student_id):
         latest_student_frames.pop(sid, None)
     with student_detection_state_lock:
         student_detection_state.pop(sid, None)
-    with runtime_warning_state_lock:
-        runtime_warning_state.pop(sid, None)
+    if clear_warning_cache:
+        with runtime_warning_state_lock:
+            runtime_warning_state.pop(sid, None)
     # Reset feed_started tracking so the event fires again if student reconnects
     with _feed_started_lock:
         _feed_started_for.discard(sid)
-    if warning_system:
+    if warning_system and clear_warning_cache:
         warning_system.reset_student(sid)
 
 # -------------------------
@@ -1318,11 +1513,17 @@ def examSessionEnd():
 
     data = request.get_json(silent=True) or {}
     student_id = str(user['Id'])
+    student_name = user.get('Name', 'Unknown')
     terminated = bool(data.get('terminated'))
     reason = str(data.get('reason') or '')
 
     try:
-        _end_exam_runtime_state(student_id)
+        if warning_system:
+            try:
+                warning_system.flush_violations_to_db(student_id, _get_active_or_latest_session_id(student_id))
+            except Exception as e:
+                logger.warning(f"flush_violations_to_db failed on exam end for {student_id}: {e}")
+        _end_exam_runtime_state(student_id, clear_warning_cache=False)
         try:
             cur = mysql.connection.cursor()
             status = 'TERMINATED' if terminated else 'COMPLETED'
@@ -1421,9 +1622,7 @@ def examAction():
     # stop admin monitoring for student
     sid_str = str(student_id) if student_id else (str(user['Id']) if user else None)
     # legacy python monitor disabled
-    
-    if sid_str:
-        _end_exam_runtime_state(sid_str)
+    runtime_state = _get_runtime_warning_state(sid_str) if sid_str else {}
     
     # Calculate results (prefer server-side derivation from submitted question list)
     time_spent = data.get('time_spent', 0)
@@ -1473,8 +1672,13 @@ def examAction():
     warnings_count = 0
     violations_list = []
     if warning_system and student_id:
-        warnings_count = warning_system.get_warnings(student_id)
-        violations_list = warning_system.get_violations(student_id)
+        sid_str = str(student_id)
+        warnings_count = warning_system.get_warnings(sid_str)
+        violations_list = warning_system.get_violations(sid_str)
+    runtime_violations = runtime_state.get('violations') or []
+    if runtime_violations and len(runtime_violations) > len(violations_list):
+        violations_list = runtime_violations
+    warnings_count = max(warnings_count, int(runtime_state.get('warnings') or 0))
     
     # ---- Save to correct DB schema ----
     # Violation type map: frontend/warning_system types -> DB ENUM values
@@ -1498,6 +1702,7 @@ def examAction():
         'STUDENT_LEFT_SEAT': 'STUDENT_LEFT_SEAT', 'student_left_seat': 'STUDENT_LEFT_SEAT',
         'mic_off': 'VOICE_DETECTED', 'MIC_OFF': 'VOICE_DETECTED',
         'head_movement': 'HEAD_MOVEMENT', 'HEAD_MOVEMENT': 'HEAD_MOVEMENT',
+        'head_down': 'HEAD_DOWN', 'HEAD_DOWN': 'HEAD_DOWN',
         'identity_mismatch': 'IDENTITY_MISMATCH', 'IDENTITY_MISMATCH': 'IDENTITY_MISMATCH',
         'camera_off': 'NO_FACE', 'CAMERA_OFF': 'NO_FACE',
         'camera_blocked': 'NO_FACE', 'CAMERA_BLOCKED': 'NO_FACE',
@@ -1509,34 +1714,60 @@ def examAction():
         'DEVTOOLS_SHORTCUT': 'PROHIBITED_SHORTCUT', 'DEVTOOLS_OPENED': 'PROHIBITED_SHORTCUT',
         'COPY_PASTE': 'PROHIBITED_SHORTCUT',
         'terminated_by_admin': 'TERMINATED_BY_ADMIN', 'TERMINATED_BY_ADMIN': 'TERMINATED_BY_ADMIN',
+        'HEAD_POSE': 'HEAD_MOVEMENT', 'head_pose': 'HEAD_MOVEMENT',
+        'Book/Notebook': 'PROHIBITED_OBJECT', 'book/notebook': 'PROHIBITED_OBJECT'
     }
     
     try:
         cur = mysql.connection.cursor()
-        
-        # 1. Find the open session we created when exam started
+
+        # Best-effort fallback for missing session start time
+        fallback_start_dt = None
+        try:
+            runtime_start_ms = int(runtime_state.get('start_time') or 0)
+        except Exception:
+            runtime_start_ms = 0
+        if runtime_start_ms > 0:
+            fallback_start_dt = datetime.fromtimestamp(runtime_start_ms / 1000.0)
+        else:
+            try:
+                ts = int(float(time_spent or 0))
+            except Exception:
+                ts = 0
+            if ts > 0:
+                fallback_start_dt = datetime.now() - timedelta(seconds=ts)
+
+        # 1. Find the most recent session (start/end endpoints may already have closed it)
         cur.execute("""
-            SELECT SessionID FROM exam_sessions
-            WHERE StudentID=%s AND Status='IN_PROGRESS'
-            ORDER BY StartTime DESC LIMIT 1
+            SELECT SessionID, StartTime, Status
+            FROM exam_sessions
+            WHERE StudentID=%s
+            ORDER BY (Status='IN_PROGRESS') DESC, StartTime DESC, SessionID DESC
+            LIMIT 1
         """, (student_id,))
         session_row = cur.fetchone()
-        
+        session_end_status = 'TERMINATED' if auto_terminated else 'COMPLETED'
+
         if session_row:
             session_id = session_row[0]
-            # Update session end time and status
-            session_end_status = 'TERMINATED' if auto_terminated else 'COMPLETED'
+            start_dt = session_row[1]
+            if (start_dt is None) and fallback_start_dt:
+                cur.execute("UPDATE exam_sessions SET StartTime=%s WHERE SessionID=%s", (fallback_start_dt, session_id))
+            # Ensure session is closed with the final status
             cur.execute("""
-                UPDATE exam_sessions SET EndTime=NOW(), Status=%s WHERE SessionID=%s
+                UPDATE exam_sessions
+                SET EndTime=NOW(), Status=%s
+                WHERE SessionID=%s
             """, (session_end_status, session_id))
         else:
             # Fallback: create session now if missing
+            start_dt = fallback_start_dt or datetime.now()
             cur.execute("""
                 INSERT INTO exam_sessions (StudentID, StartTime, EndTime, Status)
-                VALUES (%s, NOW(), NOW(), %s)
-            """, (student_id, 'TERMINATED' if auto_terminated else 'COMPLETED'))
+                VALUES (%s, %s, NOW(), %s)
+            """, (student_id, start_dt, session_end_status))
             session_id = cur.lastrowid
-            logger.warning(f"No IN_PROGRESS session found for student {student_id}. Created fallback session {session_id}.")
+            logger.warning(f"No session found for student {student_id}. Created fallback session {session_id}.")
         
         # 2. Keep only latest result per student (remove previous result rows)
         cur.execute("DELETE FROM exam_results WHERE StudentID=%s", (student_id,))
@@ -1548,16 +1779,36 @@ def examAction():
             VALUES (%s, %s, %s, %s, %s, NOW(), %s)
         """, (student_id, session_id, percentage, total_questions, correct_answers, db_status))
         
-        # 4. Insert violations into violations table
+        # 4. Persist violations for this session (rewrite to keep result pages consistent)
         if violations_list:
+            # We keep only the latest attempt per student (exam_results is overwritten),
+            # so it's safe to rewrite this session's violations to avoid duplicates/missing rows.
+            cur.execute("DELETE FROM violations WHERE SessionID=%s", (session_id,))
             for v in violations_list:
                 raw_type = v.get('type', 'TAB_SWITCH')
                 db_vtype = VTYPE_MAP.get(raw_type, VTYPE_MAP.get(str(raw_type).upper(), 'TAB_SWITCH'))
                 details = str(v.get('details', '') or '')[:500]
+                ts_raw = v.get('time') or v.get('timestamp') or None
+                ts_val = None
+                if ts_raw:
+                    try:
+                        ts_s = str(ts_raw)
+                        if 'T' in ts_s:
+                            # ISO from browser
+                            ts_val = datetime.fromisoformat(ts_s.replace('Z', '+00:00'))
+                            # MySQL adapter expects naive datetime
+                            if getattr(ts_val, 'tzinfo', None) is not None:
+                                ts_val = ts_val.replace(tzinfo=None)
+                        else:
+                            ts_val = datetime.strptime(ts_s, '%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        ts_val = None
+                if not ts_val:
+                    ts_val = datetime.now()
                 cur.execute("""
                     INSERT INTO violations (StudentID, SessionID, ViolationType, Details, Timestamp)
-                    VALUES (%s, %s, %s, %s, NOW())
-                """, (student_id, session_id, db_vtype, details))
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (student_id, session_id, str(db_vtype or 'UNKNOWN').upper(), details, ts_val))
         
         mysql.connection.commit()
         cur.close()
@@ -1579,6 +1830,9 @@ def examAction():
             'status': db_status,
             'auto_terminated': auto_terminated
         }, namespace='/admin')
+
+    if sid_str:
+        _end_exam_runtime_state(sid_str)
     
     return jsonify({
         "output": "submitted",
@@ -1604,7 +1858,7 @@ def showResult():
             cur.execute("""
                 SELECT er.Score, er.TotalQuestions, er.CorrectAnswers,
                        er.SubmissionTime, er.Status, er.SessionID,
-                       es.StartTime,
+                       es.StartTime, es.EndTime,
                        (SELECT COUNT(*) FROM violations v WHERE v.SessionID = er.SessionID) AS warnings_count
                 FROM exam_results er
                 JOIN exam_sessions es ON es.SessionID = er.SessionID
@@ -1622,11 +1876,13 @@ def showResult():
                 else:
                     percentage = float(row[0]) if row[0] else 0
                 db_status  = row[4]   # PASS / FAIL / TERMINATED
-                # Time spent (seconds)
+                # Time spent (seconds) - prefer submission/end time, fallback to now
+                start_time = row[6]
+                end_time = row[3] or row[7] or None
                 time_spent = 0
-                if row[3] and row[6]:
+                if start_time and end_time:
                     try:
-                        time_spent = max(0, int((row[3] - row[6]).total_seconds()))
+                        time_spent = max(0, int((end_time - start_time).total_seconds()))
                     except:
                         time_spent = 0
                 # Grade from percentage
@@ -1651,7 +1907,8 @@ def showResult():
                     vcur.close()
                     if vrows:
                         for vrow in vrows:
-                            vtype = str(vrow[0] or 'UNKNOWN')
+                            vtype_raw = str(vrow[0] or 'UNKNOWN')
+                            vtype = _friendly_violation_type(vtype_raw)
                             violations.append({
                                 'type': vtype,
                                 'details': str(vrow[1] or ''),
@@ -1661,6 +1918,38 @@ def showResult():
                 except Exception as v_err:
                     logger.warning(f"Violations fetch warning: {v_err}")
 
+                # Fallback to in-memory violations if DB rows are missing
+                if not violations:
+                    try:
+                        fallback_violations = []
+                        if warning_system and student_id:
+                            fallback_violations = warning_system.get_violations(str(student_id)) or []
+                        if fallback_violations:
+                            for vrow in fallback_violations:
+                                vtype_raw = str(vrow.get('type') or 'UNKNOWN')
+                                vtype = _friendly_violation_type(vtype_raw)
+                                violations.append({
+                                    'type': vtype,
+                                    'details': str(vrow.get('details') or ''),
+                                    'time': str(vrow.get('time') or '')
+                                })
+                                violations_breakdown[vtype] = violations_breakdown.get(vtype, 0) + 1
+                    except Exception as v_fallback_err:
+                        logger.warning(f"Violations fallback warning: {v_fallback_err}")
+
+                warnings_db = int(row[8]) if row[8] else 0
+                warnings_live = 0
+                if warning_system and student_id:
+                    try:
+                        warnings_live = int(warning_system.get_warnings(str(student_id)) or 0)
+                    except Exception:
+                        warnings_live = 0
+                warnings_issued = max(warnings_db, len(violations), warnings_live)
+                if db_status == 'TERMINATED' and warnings_issued < 3:
+                    warnings_issued = 3
+
+                total_violations = max(len(violations), warnings_issued if db_status == 'TERMINATED' else len(violations))
+
                 result_data = {
                     'percentage':        percentage,
                     'score':             (row[2] or 0) * 2,  # CorrectAnswers * 2
@@ -1668,13 +1957,15 @@ def showResult():
                     'total_questions':   row[1] or 125,
                     'grade':             grade,
                     'time_spent':        time_spent,
-                    'warnings_issued':   int(row[7]) if row[7] else 0,
+                    'warnings_issued':   warnings_issued,
                     'auto_terminated':   (db_status == 'TERMINATED'),
-                    'submission_time':   row[3],
+                    'status':            db_status,
+                    'reason':            request.args.get('reason') or ('Maximum warnings reached' if db_status == 'TERMINATED' else ''),
+                    'submission_time':   row[3] or row[7],
                     'exam_title':        'Final Examination',
                     'violations':        violations,
                     'violations_breakdown': violations_breakdown,
-                    'total_violations':  len(violations)
+                    'total_violations':  total_violations
                 }
         except Exception as e:
             logger.error(f"Error fetching student result: {e}", exc_info=True)
@@ -1696,7 +1987,12 @@ def showResult():
         except Exception:
             student_ctx = user
     
-    return render_template('showResultPass.html', result=result_data, studentInfo=student_ctx)
+    template_name = 'showResultPass.html'
+    if result_data and result_data.get('status') and result_data.get('status') != 'PASS':
+        template_name = 'showResultPass.html'
+    elif not result_data:
+        template_name = 'ExamResultFail.html'
+    return render_template(template_name, result=result_data, studentInfo=student_ctx)
 
 @app.route('/adminResultDetails/<int:resultId>')
 @require_role('ADMIN')
@@ -1710,7 +2006,7 @@ def adminResultDetails(resultId):
         cur.execute("""
             SELECT er.ResultID, er.StudentID, s.Name, s.Email, s.Profile,
                    er.Score, er.TotalQuestions, er.CorrectAnswers,
-                   er.SubmissionTime, er.Status, er.SessionID, es.StartTime
+                   er.SubmissionTime, er.Status, er.SessionID, es.StartTime, es.EndTime
             FROM exam_results er
             JOIN students s ON s.ID = er.StudentID
             JOIN exam_sessions es ON es.SessionID = er.SessionID
@@ -1728,10 +2024,12 @@ def adminResultDetails(resultId):
                 percentage = float(row[5]) if row[5] else 0
             db_status   = row[9]
             session_id  = row[10]
+            start_time = row[11]
+            end_time = row[8] or row[12]
             time_spent  = 0
-            if row[8] and row[11]:
+            if start_time and end_time:
                 try:
-                    time_spent = max(0, int((row[8] - row[11]).total_seconds()))
+                    time_spent = max(0, int((end_time - start_time).total_seconds()))
                 except: pass
             if percentage >= 90:   grade = 'A'
             elif percentage >= 75: grade = 'B'
@@ -1745,7 +2043,31 @@ def adminResultDetails(resultId):
                 FROM violations WHERE SessionID=%s ORDER BY Timestamp ASC
             """, (session_id,))
             vrows = cur.fetchall()
-            violations = [{'type': r[0], 'details': r[1], 'time': str(r[2])} for r in vrows]
+            violations = []
+            for r in vrows:
+                vtype = _friendly_violation_type(r[0])
+                violations.append({'type': vtype, 'details': r[1], 'time': str(r[2])})
+            if not violations and warning_system and row[1]:
+                try:
+                    fallback = warning_system.get_violations(str(row[1])) or []
+                    for v in fallback:
+                        vtype = _friendly_violation_type(v.get('type'))
+                        violations.append({
+                            'type': vtype,
+                            'details': v.get('details'),
+                            'time': str(v.get('time') or '')
+                        })
+                except Exception as v_fallback_err:
+                    logger.warning(f"Violations fallback warning: {v_fallback_err}")
+            warnings_live = 0
+            if warning_system and row[1]:
+                try:
+                    warnings_live = int(warning_system.get_warnings(str(row[1])) or 0)
+                except Exception:
+                    warnings_live = 0
+            warnings_issued = max(len(violations), warnings_live)
+            if db_status == 'TERMINATED' and warnings_issued < 3:
+                warnings_issued = 3
             
             result_data = {
                 'id': row[0], 'student_id': row[1],
@@ -1755,10 +2077,11 @@ def adminResultDetails(resultId):
                 'total_questions': row[6] or 125,
                 'percentage': percentage, 'grade': grade,
                 'time_spent': time_spent,
-                'warnings_issued': len(violations),
+                'warnings_issued': warnings_issued,
                 'auto_terminated': (db_status == 'TERMINATED'),
                 'submission_time': row[8],
             }
+            result_data['violations_missing'] = (result_data['auto_terminated'] and len(violations) == 0)
         cur.close()
     except Exception as e:
         logger.error(f"Error fetching result details: {e}", exc_info=True)
@@ -1776,7 +2099,14 @@ def adminResults():
     results = []
     try:
         ensure_db_schema()
+        page = max(1, int(request.args.get('page', 1) or 1))
+        limit = max(1, min(100, int(request.args.get('limit', 20) or 20)))
+        offset = (page - 1) * limit
         cur = mysql.connection.cursor()
+        cur.execute("SELECT COUNT(DISTINCT StudentID) FROM exam_results")
+        total_results = int(cur.fetchone()[0] or 0)
+        pages = max(1, math.ceil(total_results / limit)) if limit else 1
+        # Fetch latest result per student with violation count from DB
         cur.execute("""
             SELECT
                 er.ResultID,
@@ -1791,23 +2121,31 @@ def adminResults():
                 er.Status,
                 er.SessionID,
                 es.StartTime,
-                (SELECT COUNT(*) FROM violations v WHERE v.SessionID = er.SessionID) AS warnings_count
+                es.EndTime,
+                (SELECT COUNT(*) FROM violations v WHERE v.SessionID = er.SessionID) AS violations_count
             FROM exam_results er
-            JOIN students     s  ON s.ID        = er.StudentID
-            JOIN exam_sessions es ON es.SessionID = er.SessionID
+            JOIN students      s  ON s.ID         = er.StudentID
+            LEFT JOIN exam_sessions es ON es.SessionID  = er.SessionID
             WHERE er.ResultID IN (
-                SELECT MAX(er2.ResultID)
+                SELECT er2.ResultID
                 FROM exam_results er2
-                GROUP BY er2.StudentID
+                INNER JOIN (
+                    SELECT StudentID, MAX(SubmissionTime) AS latest_time
+                    FROM exam_results
+                    GROUP BY StudentID
+                ) latest ON latest.StudentID = er2.StudentID
+                         AND latest.latest_time = er2.SubmissionTime
             )
             ORDER BY er.SubmissionTime DESC
-        """)
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
         rows = cur.fetchall()
         cur.close()
         
         for row in rows:
-            total_q = int(row[6] or 0)
+            total_q   = int(row[6] or 0)
             correct_q = int(row[7] or 0)
+            sid_str   = str(row[1])
             if total_q > 0:
                 percentage = round((correct_q / total_q) * 100.0, 2)
             else:
@@ -1815,9 +2153,11 @@ def adminResults():
             db_status  = row[9]   # PASS / FAIL / TERMINATED
             # Time spent in seconds
             time_spent = 0
-            if row[8] and row[11]:
+            start_time = row[11]
+            end_time = row[8] or row[12]
+            if start_time and end_time:
                 try:
-                    time_spent = max(0, int((row[8] - row[11]).total_seconds()))
+                    time_spent = max(0, int((end_time - start_time).total_seconds()))
                 except: pass
             # Grade
             if percentage >= 90:   grade = 'A'
@@ -1825,27 +2165,60 @@ def adminResults():
             elif percentage >= 60: grade = 'C'
             elif percentage >= 50: grade = 'D'
             else:                  grade = 'F'
+
+            # Warnings count: use violations DB count as primary source
+            violations_db_count = int(row[13]) if row[13] else 0
+            # Also check in-memory warning_system for real-time accuracy
+            mem_warnings = 0
+            if warning_system and sid_str:
+                try:
+                    mem_warnings = int(warning_system.get_warnings(sid_str) or 0)
+                except:
+                    pass
+            # Use the maximum of DB violations and in-memory warnings — whichever is higher is more accurate
+            warnings_issued = max(violations_db_count, mem_warnings)
+            if db_status == 'TERMINATED' and warnings_issued < 3:
+                warnings_issued = 3
             
+            # student_profile: URL or filename for student photo
+            student_profile = row[4] or ''
+            
+            # For display, align violations with warnings to avoid showing 0 when terminated
+            display_violations = max(violations_db_count, warnings_issued)
+
             results.append({
                 'result_id':       row[0],
                 'student_id':      row[1],
                 'student_name':    row[2],
                 'student_email':   row[3],
-                'student_profile': row[4],
+                'student_profile': student_profile,
                 'exam_title':      'Final Examination',
-                'score':           (row[7] or 0) * 2,  # CorrectAnswers * 2 = raw points
-                'total_questions': row[6] or 125,
+                'score':           correct_q,
+                'total_questions': total_q if total_q > 0 else 0,
                 'percentage':      percentage,
                 'grade':           grade,
                 'time_spent':      time_spent,
-                'warnings_issued': int(row[12]) if row[12] else 0,
+                'warnings_issued': warnings_issued,
+                'violations':      display_violations,
                 'auto_terminated': (db_status == 'TERMINATED'),
                 'submission_time': row[8],
             })
     except Exception as e:
         logger.error(f"Error fetching results: {e}", exc_info=True)
         flash(f"Error loading results: {e}", "danger")
-    return render_template('ExamResult.html', results=results)
+    # Add no-cache headers so admin panel always fetches fresh data (not stale browser cache)
+    resp = make_response(render_template(
+        'ExamResult.html',
+        results=results,
+        total_results=total_results if 'total_results' in locals() else len(results),
+        page=page if 'page' in locals() else 1,
+        pages=pages if 'pages' in locals() else 1,
+        limit=limit if 'limit' in locals() else 20
+    ))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 @app.route('/adminRecordings')
 @require_role('ADMIN')
@@ -2036,9 +2409,16 @@ def adminStudents():
     try:
         logger.info("=== ADMIN STUDENTS PAGE LOAD ===")
         ensure_db_schema()
+        page = max(1, int(request.args.get('page', 1) or 1))
+        limit = max(1, min(100, int(request.args.get('limit', 20) or 20)))
+        offset = (page - 1) * limit
         
         cur = mysql.connection.cursor()
-        cur.execute("SELECT id, name, email, password, profile FROM students WHERE Role='STUDENT'")
+        cur.execute("SELECT COUNT(*) FROM students WHERE Role='STUDENT'")
+        total_students = int(cur.fetchone()[0] or 0)
+        pages = max(1, math.ceil(total_students / limit)) if limit else 1
+
+        cur.execute("SELECT id, name, email, password, profile FROM students WHERE Role='STUDENT' ORDER BY id LIMIT %s OFFSET %s", (limit, offset))
         rows = cur.fetchall()
         
         logger.info(f"Number of student records found: {len(rows)}")
@@ -2046,38 +2426,41 @@ def adminStudents():
         # Fetch latest result per student using correct schema
         results_map = {}
         try:
-            cur.execute("""
-                SELECT er.StudentID, er.Score, er.TotalQuestions, er.CorrectAnswers,
-                       er.SubmissionTime, er.Status,
-                       (SELECT COUNT(*) FROM violations v WHERE v.SessionID = er.SessionID) AS warnings_count
-                FROM exam_results er
-                WHERE er.ResultID IN (
-                    SELECT MAX(ResultID) FROM exam_results GROUP BY StudentID
-                )
-            """)
-            result_rows = cur.fetchall()
-            for r in result_rows:
-                total_q = int(r[2] or 0)
-                correct_q = int(r[3] or 0)
-                if total_q > 0:
-                    pct = round((correct_q / total_q) * 100.0, 2)
-                else:
-                    pct = float(r[1]) if r[1] else 0
-                status = r[5]
-                if pct >= 90:   grade = 'A'
-                elif pct >= 75: grade = 'B'
-                elif pct >= 60: grade = 'C'
-                elif pct >= 50: grade = 'D'
-                else:           grade = 'F'
-                results_map[r[0]] = {
-                    'score':           (r[3] or 0) * 2,
-                    'total_questions': r[2] or 125,
-                    'percentage':      pct,
-                    'grade':           grade,
-                    'warnings_issued': int(r[6]) if r[6] else 0,
-                    'auto_terminated': (status == 'TERMINATED'),
-                    'submission_time': r[4],
-                }
+            student_ids = [row[0] for row in rows]
+            if student_ids:
+                placeholders = ','.join(['%s'] * len(student_ids))
+                cur.execute(f"""
+                    SELECT er.StudentID, er.Score, er.TotalQuestions, er.CorrectAnswers,
+                           er.SubmissionTime, er.Status,
+                           (SELECT COUNT(*) FROM violations v WHERE v.SessionID = er.SessionID) AS warnings_count
+                    FROM exam_results er
+                    WHERE er.ResultID IN (
+                        SELECT MAX(ResultID) FROM exam_results WHERE StudentID IN ({placeholders}) GROUP BY StudentID
+                    )
+                """, tuple(student_ids))
+                result_rows = cur.fetchall()
+                for r in result_rows:
+                    total_q = int(r[2] or 0)
+                    correct_q = int(r[3] or 0)
+                    if total_q > 0:
+                        pct = round((correct_q / total_q) * 100.0, 2)
+                    else:
+                        pct = float(r[1]) if r[1] else 0
+                    status = r[5]
+                    if pct >= 90:   grade = 'A'
+                    elif pct >= 75: grade = 'B'
+                    elif pct >= 60: grade = 'C'
+                    elif pct >= 50: grade = 'D'
+                    else:           grade = 'F'
+                    results_map[r[0]] = {
+                        'score':           (r[3] or 0) * 2,
+                        'total_questions': r[2] or 125,
+                        'percentage':      pct,
+                        'grade':           grade,
+                        'warnings_issued': int(r[6]) if r[6] else 0,
+                        'auto_terminated': (status == 'TERMINATED'),
+                        'submission_time': r[4],
+                    }
         except Exception as re:
             logger.warning(f"Results fetch warning: {re}")
         
@@ -2114,7 +2497,11 @@ def adminStudents():
             "Students.html",  # Make sure this matches your template filename
             students=students,
             registered_count=registered_count,
-            MONITORING_ENABLED=MONITORING_ENABLED
+            MONITORING_ENABLED=MONITORING_ENABLED,
+            page=page,
+            pages=pages,
+            total_students=total_students,
+            limit=limit
         )
         
     except Exception as e:
@@ -2350,6 +2737,16 @@ def registerFace():
             except Exception:
                 flash("Invalid webcam image data", 'error')
                 return redirect(url_for('adminStudents'))
+        elif request.is_json and request.json.get('image_data'):
+            try:
+                image_b64 = request.json.get('image_data', '')
+                image_b64 = image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+                img_bytes = base64.b64decode(image_b64)
+                with open(save_path, 'wb') as out:
+                    out.write(img_bytes)
+            except Exception:
+                flash("Invalid image payload", 'error')
+                return redirect(url_for('adminStudents'))
         else:
             cur = mysql.connection.cursor()
             cur.execute("SELECT Profile FROM students WHERE ID=%s", (student_id,))
@@ -2385,6 +2782,89 @@ def registerFace():
         logger.error(f"registerFace error: {e}")
         flash("Error registering face", 'error')
         return redirect(url_for('adminStudents'))
+
+@app.route('/api/detect-eyes', methods=['POST'])
+@rate_limit('detect_eyes', max_requests=60, window_seconds=60)
+def api_detect_eyes():
+    """Optional helper: detect eye pairs using Haar cascade for niqab fallback."""
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+    except Exception:
+        return jsonify({'error': 'cv2_unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    image_b64 = data.get('image', '')
+    if not image_b64:
+        return jsonify({'error': 'No image provided'}), 400
+    try:
+        image_b64 = image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+        img_bytes = base64.b64decode(image_b64)
+        nparr = _np.frombuffer(img_bytes, _np.uint8)
+        img = _cv2.imdecode(nparr, _cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return jsonify({'error': 'decode_failed'}), 400
+        cascade_path = os.path.join('Haarcascades', 'haarcascade_eye.xml')
+        if not os.path.exists(cascade_path):
+            return jsonify({'error': 'cascade_missing'}), 500
+        eye_cascade = _cv2.CascadeClassifier(cascade_path)
+        detections = eye_cascade.detectMultiScale(img, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
+        bboxes = [[int(x), int(y), int(w), int(h)] for (x, y, w, h) in detections]
+        eye_pairs = max(1, len(bboxes) // 2) if len(bboxes) >= 2 else len(bboxes) // 2
+        return jsonify({'eye_pairs': eye_pairs, 'bboxes': bboxes})
+    except Exception as e:
+        logger.warning(f"/api/detect-eyes failed: {e}")
+        return jsonify({'error': 'processing_failed'}), 500
+
+@app.route('/api/detect-book', methods=['POST'])
+@rate_limit('detect_book', max_requests=40, window_seconds=60)
+def api_detect_book():
+    """Detect large rectangular book/notebook using OpenCV contour heuristic."""
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+    except Exception:
+        return jsonify({'book_detected': False, 'error': 'cv2_unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    image_b64 = data.get('image', '')
+    if not image_b64:
+        return jsonify({'book_detected': False, 'error': 'No image provided'}), 400
+    try:
+        image_b64 = image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+        img_bytes = base64.b64decode(image_b64)
+        nparr = _np.frombuffer(img_bytes, _np.uint8)
+        img = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({'book_detected': False, 'error': 'decode_failed'}), 400
+        h, w = img.shape[:2]
+        gray = _cv2.cvtColor(img, _cv2.COLOR_BGR2GRAY)
+        gray = _cv2.GaussianBlur(gray, (15, 15), 0)
+        edges = _cv2.Canny(gray, 40, 120)
+        contours, _ = _cv2.findContours(edges, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+        detected = False
+        for cnt in contours:
+            area = _cv2.contourArea(cnt)
+            if area < 3_000:
+                continue
+            rect = _cv2.minAreaRect(cnt)
+            (cx, cy), (rw, rh), _ = rect
+            if rh == 0 or rw == 0:
+                continue
+            aspect = max(rw, rh) / max(1e-3, min(rw, rh))
+            if aspect < 0.4 or aspect > 3.5:
+                continue
+            hull = _cv2.convexHull(cnt)
+            hull_area = _cv2.contourArea(hull)
+            solidity = area / max(hull_area, 1e-3)
+            if solidity < 0.65:
+                continue
+            if cy < h * 0.4:
+                continue  # only consider bottom 60% (desk area)
+            detected = True
+            break
+        return jsonify({'book_detected': detected})
+    except Exception as e:
+        logger.warning(f"/api/detect-book failed: {e}")
+        return jsonify({'book_detected': False, 'error': 'processing_failed'}), 500
 
 # -------------------------
 # API Endpoints for Real-Time Data
@@ -2591,11 +3071,7 @@ def api_student_exit_signal():
             """, (student_id,))
             sess = cur.fetchone()
             if sess:
-                cur.execute("""
-                    INSERT INTO violations (StudentID, SessionID, ViolationType, Details, Timestamp)
-                    VALUES (%s, %s, %s, %s, NOW())
-                """, (student_id, sess[0], 'TAB_SWITCH', f"{event_type}: {details}"))
-                mysql.connection.commit()
+                write_violation_async(student_id, sess[0], 'TAB_SWITCH', f"{event_type}: {details}")
             cur.close()
         except Exception as db_err:
             logger.warning(f"student_exit_signal DB save failed: {db_err}")
@@ -2715,6 +3191,10 @@ def api_all_student_warnings():
 @require_role('ADMIN')
 def api_admin_active_students():
     """Return a list of active students with live warnings and start times."""
+    now = time.time()
+    if _student_cache['data'] and (now - _student_cache['ts']) < 10:
+        return jsonify(_student_cache['data'])
+
     ensure_db_schema()
     active_ids = set()
 
@@ -2729,7 +3209,9 @@ def api_admin_active_students():
             active_ids.update(str(sid) for sid in warning_system.warnings.keys())
 
     if not active_ids:
-        return jsonify({'students': []})
+        _student_cache['data'] = {'students': []}
+        _student_cache['ts'] = now
+        return jsonify(_student_cache['data'])
 
     names = {}
     start_times = {}
@@ -2799,7 +3281,10 @@ def api_admin_active_students():
             'face_count': (telemetry_metrics or {}).get('face_count')
         })
 
-    return jsonify({'students': students})
+    response = {'students': students}
+    _student_cache['data'] = response
+    _student_cache['ts'] = time.time()
+    return jsonify(response)
 
 # Pipeline API endpoints were removed since inference runs in client WASM
 
@@ -2812,6 +3297,9 @@ if MONITORING_ENABLED and socketio:
         sid = request.sid
         user = current_user()
         user_id = str((user or {}).get('Id') or request.args.get('student_id') or '')
+        if user_id:
+            with _student_socket_sids_lock:
+                _student_socket_sids[user_id] = sid
         try:
             if user_id:
                 join_room(f"student:{user_id}")
@@ -2822,12 +3310,24 @@ if MONITORING_ENABLED and socketio:
     @socketio.on('disconnect', namespace='/student')
     def student_disconnect():
         sid = request.sid
+        try:
+            with _student_socket_sids_lock:
+                for uid, ssid in list(_student_socket_sids.items()):
+                    if ssid == sid:
+                        _student_socket_sids.pop(uid, None)
+                        break
+        except Exception:
+            pass
         logger.info(f'Student socket disconnected: {sid}')
 
     @socketio.on('connect', namespace='/admin')
     def admin_connect():
         sid = request.sid
         logger.info(f"Admin socket connected: sid={sid}")
+        try:
+            join_room('admin_room')
+        except Exception:
+            pass
 
     @socketio.on('disconnect', namespace='/admin')
     def admin_disconnect():
@@ -2903,13 +3403,16 @@ if MONITORING_ENABLED and socketio:
             'STUDENT_LEFT_SEAT': 'STUDENT_LEFT_SEAT', 'student_left_seat': 'STUDENT_LEFT_SEAT',
             'MIC_OFF': 'VOICE_DETECTED', 'mic_off': 'VOICE_DETECTED',
             'HEAD_MOVEMENT': 'HEAD_MOVEMENT', 'head_movement': 'HEAD_MOVEMENT',
+            # HEAD_DOWN: new head-down detection feature — maps to its own violation type
+            'HEAD_DOWN': 'HEAD_DOWN', 'head_down': 'HEAD_DOWN',
+            'HEAD_POSE': 'HEAD_MOVEMENT', 'head_pose': 'HEAD_MOVEMENT',
             'IDENTITY_MISMATCH': 'IDENTITY_MISMATCH', 'identity_mismatch': 'IDENTITY_MISMATCH',
             'CAMERA_OFF': 'NO_FACE', 'camera_off': 'NO_FACE',
             'CAMERA_BLOCKED': 'NO_FACE', 'camera_blocked': 'NO_FACE',
             'PROHIBITED_OBJECT': 'PROHIBITED_OBJECT', 'prohibited_object': 'PROHIBITED_OBJECT',
             'TERMINATED_BY_ADMIN': 'TERMINATED_BY_ADMIN', 'terminated_by_admin': 'TERMINATED_BY_ADMIN',
         }
-        db_vtype = VTYPE_MAP.get(vtype, VTYPE_MAP.get(str(vtype).upper(), 'TAB_SWITCH'))
+        db_vtype = VTYPE_MAP.get(vtype, VTYPE_MAP.get(str(vtype).upper(), 'DISTRACTION'))
         try:
             cur = mysql.connection.cursor()
             cur.execute("""
@@ -2918,31 +3421,33 @@ if MONITORING_ENABLED and socketio:
                 ORDER BY StartTime DESC LIMIT 1
             """, (student_id,))
             sess = cur.fetchone()
-            if sess:
-                cur.execute("""
-                    INSERT INTO violations (StudentID, SessionID, ViolationType, Details, Timestamp)
-                    VALUES (%s, %s, %s, %s, NOW())
-                """, (student_id, sess[0], db_vtype, str(details)[:500]))
-                mysql.connection.commit()
+            # DB persistence is handled via warning_system.violation_writer; avoid double-inserts.
+            if sess and not warning_system:
+                write_violation_async(student_id, sess[0], db_vtype, str(details)[:500])
             cur.close()
         except Exception as db_err:
             logger.warning(f"Live violation DB save failed: {db_err}")
 
-@socketio.on('exam_auto_terminated', namespace='/student')
-def handle_exam_auto_terminated(data):
-    """Student exam terminated due to max warnings"""
-    student_id   = data.get('student_id')
-    student_name = data.get('student_name', 'Unknown')
-    reason       = data.get('reason', 'Max warnings reached')
-    logger.info(f"🚫 Exam auto-terminated: student={student_id}")
-    if student_id:
-        _end_exam_runtime_state(str(student_id))
-    socketio.emit('student_exam_terminated', {
-        'student_id':   student_id,
-        'student_name': student_name,
-        'reason':       reason,
-    }, namespace='/admin')
-
+    @socketio.on('exam_auto_terminated', namespace='/student')
+    def handle_exam_auto_terminated(data):
+        """Student exam terminated due to max warnings"""
+        student_id   = data.get('student_id')
+        student_name = data.get('student_name', 'Unknown')
+        reason       = data.get('reason', 'Max warnings reached')
+        logger.info(f"🚫 Exam auto-terminated: student={student_id}")
+        if student_id:
+            if warning_system:
+                try:
+                    warning_system.flush_violations_to_db(student_id, _get_active_or_latest_session_id(student_id))
+                except Exception as e:
+                    logger.warning(f"flush_violations_to_db failed for {student_id}: {e}")
+            _end_exam_runtime_state(str(student_id), clear_warning_cache=False)
+        socketio.emit('student_exam_terminated', {
+            'student_id':   student_id,
+            'student_name': student_name,
+            'reason':       reason,
+        }, namespace='/admin')
+    
     @socketio.on('terminate_exam', namespace='/student')
     def handle_terminate_exam(data):
         student_id = str(data.get('student_id'))
@@ -2950,7 +3455,7 @@ def handle_exam_auto_terminated(data):
         if warning_system:
             warning_system.add_warning(student_id, 'TERMINATED_BY_ADMIN', reason, emit_to_student=False)
         emit('terminated_ack', {'student_id': student_id, 'reason': reason})
-
+    
     @socketio.on('prohibited_action', namespace='/student')
     def handle_prohibited_action(data):
         student_id = str(data.get('student_id'))
@@ -2968,7 +3473,7 @@ def handle_exam_auto_terminated(data):
                 emit('auto_terminated', {'student_id': student_id})
         else:
             logger.info(f"[SHORTCUT IGNORED] student={student_id} action={action}")
-
+    
     @socketio.on('tab_switch_detected', namespace='/student')
     def handle_tab_switch(data):
         student_id = str(data.get('student_id'))
@@ -2986,7 +3491,7 @@ def handle_exam_auto_terminated(data):
             logger.info(f"[TAB_SWITCH] student={student_id} details={details} terminated={terminated}")
         else:
             logger.info(f"[TAB_SWITCH IGNORED] missing student_id details={details}")
-
+    
     # --- WASM TELEMETRY LAYER ---
     @socketio.on('telemetry_update', namespace='/student')
     def handle_telemetry_update(data):
@@ -3005,6 +3510,9 @@ def handle_exam_auto_terminated(data):
             allowed_objects.append('paper')
         
         sid_str = student_id
+        # If v2 telemetry is already flowing, avoid duplicating object alerts
+        last_v2 = float(_last_v2_telemetry_at.get(sid_str, 0.0))
+        use_legacy_alerts = (time.time() - last_v2) > 2.0
         now_ts = time.time()
         
         with latest_student_frames_lock:
@@ -3034,13 +3542,49 @@ def handle_exam_auto_terminated(data):
                 'last_prohibited_object_labels': allowed_objects,
                 'last_person_count': faces,
             }
-
+    
+        # Server-side object warning from legacy telemetry when v2 is absent
+        if use_legacy_alerts and ('book' in allowed_objects or 'paper' in allowed_objects):
+            student_name = _get_runtime_warning_state(sid_str).get('student_name') or f"Student {sid_str}"
+            label = 'book' if 'book' in allowed_objects else 'paper'
+            _maybe_issue_object_warning(sid_str, student_name, label)
+    
     # --- WEBRTC SIGNALING (STUDENT -> ADMIN) ---
-
-    # ── Ring buffer for detailed telemetry history (admin cross-verification) ──
+    
+    # ── Telemetry buffering & history ──
     _telemetry_history = {}  # { student_id: deque(maxlen=200) }
     _telemetry_history_lock = threading.Lock()
-
+    _telemetry_buffer = {}   # { student_id: latest telemetry payload }
+    _telemetry_buffer_lock = threading.Lock()
+    
+    def flush_telemetry_loop():
+        while True:
+            try:
+                if EVENTLET_AVAILABLE:
+                    eventlet.sleep(0.25)
+                else:
+                    time.sleep(0.25)
+                with _telemetry_buffer_lock:
+                    snapshot = dict(_telemetry_buffer)
+                    _telemetry_buffer.clear()
+                if not snapshot:
+                    continue
+                for sid, payload in snapshot.items():
+                    try:
+                        socketio.emit('telemetry_update', {'student_id': sid, 'data': payload},
+                                      room='admin_room', namespace='/admin')
+                    except Exception as emit_err:
+                        logger.warning(f"telemetry flush emit failed for {sid}: {emit_err}")
+            except Exception as loop_err:
+                logger.error(f"telemetry flush loop error: {loop_err}", exc_info=True)
+                if not EVENTLET_AVAILABLE:
+                    time.sleep(0.25)
+    
+    if EVENTLET_AVAILABLE:
+        eventlet.spawn(flush_telemetry_loop)
+    else:
+        threading.Thread(target=flush_telemetry_loop, daemon=True).start()
+    
     @socketio.on('student_live_frame', namespace='/student')
     def handle_student_live_frame(data):
         """Relay live camera frame from student to admin via socket (no OpenCV needed)."""
@@ -3110,7 +3654,7 @@ def handle_exam_auto_terminated(data):
             if student_id not in _feed_started_for:
                 _feed_started_for.add(student_id)
                 socketio.emit('feed_started', {'student_id': student_id}, namespace='/admin')
-
+    
     @socketio.on('student_audio_chunk', namespace='/student')
     def handle_audio_chunk(data):
         """
@@ -3130,7 +3674,7 @@ def handle_exam_auto_terminated(data):
                 
         except Exception as e:
             logger.error(f"Error relaying audio chunk: {e}")
-
+    
     @socketio.on('admin_trigger_voice_warning', namespace='/admin')
     def handle_admin_voice_detection_trigger(data):
         """
@@ -3151,18 +3695,25 @@ def handle_exam_auto_terminated(data):
             socketio.emit('voice_alert', {'detected': True, 'rms': data.get('rms', 100)}, namespace='/student', to=target_room)
         except Exception as e:
             logger.error(f"Error triggering voice warning: {e}")
-
+    
     @socketio.on('telemetry_update_v2', namespace='/student')
     def handle_telemetry_update_v2(data):
         """Receive hyper-detailed telemetry from student WASM engine and relay to admin."""
         student_id = str(data.get('student_id', ''))
         if not student_id:
             return
+        _last_v2_telemetry_at[student_id] = time.time()
         score = data.get('analysis', {}).get('suspicion_score', 0)
         metrics = data.get('metrics', {})
         # Normalize & filter labels to only the objects we care about.
         raw_labels = [str(l).lower() for l in (metrics.get('banned_labels') or [])]
-        allowed_labels = {'cell phone', 'phone', 'clock', 'smartwatch', 'book', 'paper'}
+        allowed_labels = {
+            'cell phone', 'phone',
+            'clock', 'smartwatch',
+            'book', 'book_heuristic', 'notebook', 'textbook', 'copy', 'register',
+            'journal', 'notepad', 'notes', 'binder', 'folder', 'document', 'magazine',
+            'paper'
+        }
         filtered = [l for l in raw_labels if l in allowed_labels]
         normalized = []
         for label in filtered:
@@ -3170,14 +3721,15 @@ def handle_exam_auto_terminated(data):
                 normalized.append('cell phone')
             elif label in ('clock', 'smartwatch'):
                 normalized.append('smartwatch')
-            elif label == 'book':
+            elif label in ('book', 'book_heuristic', 'notebook', 'textbook', 'copy', 'register', 'journal', 'notepad', 'notes', 'binder', 'folder', 'document', 'magazine'):
                 normalized.append('book')
             elif label == 'paper':
                 normalized.append('paper')
         metrics['banned_labels'] = list(dict.fromkeys(normalized))
         data['metrics'] = metrics
-
+    
         runtime_state = _get_runtime_warning_state(student_id)
+        student_name = runtime_state.get('student_name') or f"Student {student_id}"
         warnings_count = int(runtime_state.get('warnings') or 0)
         if warning_system:
             try:
@@ -3190,11 +3742,16 @@ def handle_exam_auto_terminated(data):
         data['violations'] = violations[-5:]
         if start_time:
             data['start_time'] = int(start_time)
-
+    
+        # If server sees book/paper in telemetry, issue a server warning immediately
+        if 'book' in metrics.get('banned_labels', []) or 'paper' in metrics.get('banned_labels', []):
+            label = 'book' if 'book' in metrics.get('banned_labels', []) else 'paper'
+            _maybe_issue_object_warning(student_id, student_name, label)
+    
         # Ensure student appears in admin polling
         with active_exam_students_lock:
             active_exam_students.add(student_id)
-
+    
         # Inject server-side voice_detected flag into active_flags
         analysis = data.get('analysis', {})
         active_flags = analysis.get('active_flags', [])
@@ -3206,7 +3763,7 @@ def handle_exam_auto_terminated(data):
         metrics['voice_rms'] = float(voice_rms)
         metrics['voice_threat_level'] = min(100, int((voice_rms / 1000) * 100)) # Scale 0-100%
         data['metrics'] = metrics
-
+    
         if is_voice:
             if 'voice_detected' not in active_flags:
                 active_flags.append('voice_detected')
@@ -3216,14 +3773,14 @@ def handle_exam_auto_terminated(data):
             
         # Reset the voice activity trap for the next telemetry window
         _student_voice_activity[student_id] = {"active": False, "rms": 0}
-
+    
         # Store in ring buffer for cross-verification
         from collections import deque
         with _telemetry_history_lock:
             if student_id not in _telemetry_history:
                 _telemetry_history[student_id] = deque(maxlen=200)
             _telemetry_history[student_id].append(data)
-
+    
         # Update existing tracking dict
         now_ts = time.time()
         with latest_student_frames_lock:
@@ -3250,13 +3807,16 @@ def handle_exam_auto_terminated(data):
                 'last_person_count': metrics.get('person_count', 0),
                 'wasm_telemetry': data,  # Store full telemetry for admin
             }
-
+    
         if score >= 50:
             logger.info(f"🚨 [WASM TELEMETRY v2] High Suspicion for {student_id}: Score {score}")
-
-        # Broadcast to admin namespace
-        socketio.emit('student_telemetry_v2', data, namespace='/admin')
-
+    
+        # Buffer for batched admin delivery
+        with _telemetry_buffer_lock:
+            _telemetry_buffer[student_id] = data
+        # Bust cached admin-active-students snapshot
+        _student_cache['data'] = None
+    
     @socketio.on('admin_notify_student', namespace='/admin')
     def handle_admin_notify_student(data):
         """Relay an observation notification from admin to a specific student."""
@@ -3275,7 +3835,7 @@ def handle_exam_auto_terminated(data):
         target_room = f"student:{student_id}"
         logger.info(f"🔔 Admin notifying student in room {target_room}")
         socketio.emit('admin_notification', notification_payload, namespace='/student', to=target_room)
-
+    
     @socketio.on('force_terminate_exam', namespace='/admin')
     def handle_force_terminate_exam(data):
         """Admin force terminates a student's exam with a summary report."""
@@ -3284,21 +3844,36 @@ def handle_exam_auto_terminated(data):
             return
         reason = data.get('reason', 'Administrative decision')
         metrics_summary = data.get('metrics_summary', {})
-
+    
         termination_payload = {
             'terminated': True,
             'reason': reason,
             'metrics_summary': metrics_summary,
             'timestamp': time.time()
         }
-
+    
         target_room = f"student:{student_id}"
         logger.warning(f'? Admin FORCE TERMINATED student in room {target_room}: {reason}')
         socketio.emit('exam_terminated', termination_payload, namespace='/student', to=target_room)
+        if warning_system:
+            try:
+                warning_system.flush_violations_to_db(student_id, _get_active_or_latest_session_id(student_id))
+            except Exception as e:
+                logger.warning(f"flush_violations_to_db failed for {student_id}: {e}")
         _end_exam_runtime_state(student_id)
-
+    
         if warning_system:
             warning_system.reset_student(student_id)
+
+    @socketio.on('admin_book_detected', namespace='/admin')
+    def handle_admin_book_detected(data):
+        """Admin-side detection (dashboard) triggers a book warning to the student."""
+        student_id = str(data.get('student_id') or '')
+        label = data.get('label') or 'book'
+        student_name = data.get('student_name') or f"Student {student_id}"
+        if not student_id:
+            return
+        _maybe_issue_object_warning(student_id, student_name, label)
 
     @socketio.on('request_student_frames', namespace='/admin')
     def handle_request_student_frames(data):
@@ -3306,12 +3881,12 @@ def handle_exam_auto_terminated(data):
         student_id = str(data.get('student_id', ''))
         count = min(int(data.get('count', 6)), 10)
         socketio.emit('capture_frames', {'count': count, 'request_id': data.get('request_id')}, namespace='/student', to=student_id)
-
+    
     @socketio.on('student_frame_response', namespace='/student')
     def handle_student_frame_response(data):
         """Student sends captured frames back to admin for cross-verification."""
         socketio.emit('student_frame_captured', data, namespace='/admin')
-
+    
     @app.route('/api/admin/student-telemetry/<student_id>', methods=['GET'])
     @require_role('ADMIN')
     def get_student_telemetry_history(student_id):
@@ -3319,15 +3894,15 @@ def handle_exam_auto_terminated(data):
         with _telemetry_history_lock:
             history = list(_telemetry_history.get(student_id, []))
         return jsonify({'student_id': student_id, 'history': history[-50:]})  # Last 50 entries
-
+    
     @socketio.on('webrtc_offer', namespace='/student')
     def handle_webrtc_offer(data):
         socketio.emit('webrtc_offer', data, namespace='/admin')
-
+    
     @socketio.on('webrtc_ice_candidate', namespace='/student')
     def handle_webrtc_ice_student(data):
         socketio.emit('webrtc_ice_candidate', data, namespace='/admin')
-
+    
     # --- ADMIN CONTROL ACTIONS ---
     @socketio.on('admin_clear_warnings', namespace='/admin')
     def handle_admin_clear_warnings(data):
@@ -3340,7 +3915,7 @@ def handle_exam_auto_terminated(data):
             namespace='/student',
             room=f"student:{student_id}"
         )
-
+    
     @socketio.on('admin_force_terminate', namespace='/admin')
     def handle_admin_force_terminate(data):
         student_id = str(data.get('student_id'))
@@ -3349,30 +3924,30 @@ def handle_exam_auto_terminated(data):
             warning_system.manually_terminate_student(student_id, reason)
         if student_id:
             _end_exam_runtime_state(student_id)
-
+    
     @socketio.on('admin_toggle_enforcement', namespace='/admin')
     def handle_admin_toggle_enforcement(data):
         enabled = bool(data.get('enabled', True))
         if warning_system:
             warning_system.set_auto_terminate(enabled)
             emit('enforcement_toggled', {'enabled': enabled}, namespace='/admin')
-
+    
     # --- WEBRTC SIGNALING (ADMIN -> STUDENT) ---
     @socketio.on('request_webrtc_stream', namespace='/admin')
     def handle_request_webrtc_stream(data):
         student_id = data.get('student_id')
         socketio.emit('request_webrtc_stream', data, namespace='/student', room=f"student:{student_id}")
-
+    
     @socketio.on('webrtc_answer', namespace='/admin')
     def handle_webrtc_answer(data):
         student_id = data.get('student_id')
         socketio.emit('webrtc_answer', data, namespace='/student', room=f"student:{student_id}")
-
+    
     @socketio.on('webrtc_ice_candidate', namespace='/admin')
     def handle_webrtc_ice_admin(data):
         student_id = data.get('student_id')
         socketio.emit('webrtc_ice_candidate', data, namespace='/student', room=f"student:{student_id}")
-
+    
 # -------------------------
 # System Health API
 # -------------------------

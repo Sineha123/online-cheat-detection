@@ -642,10 +642,180 @@
         const ADMIN_VERIFY_HIGH_THRESHOLD = 58;
         const ADMIN_VERIFY_FLAG_COOLDOWN_SEC = 120;
 
+        // --- Voice detection tuning (pulled from detection_config when available) ---
+        const defaultVoiceConfig = {
+            VOICE_RMS_THRESHOLD: 0.016,
+            VOICE_ZCR_MIN: 0.08,
+            VOICE_ZCR_MAX: 0.45,
+            VOICE_SPECTRAL_FLUX_THRESHOLD: 0.012,
+            VOICE_EMA_ALPHA: 0.3,
+            VOICE_COOLDOWN_MS: 350,
+            VOICE_HIGHPASS_HZ: 300,
+            VOICE_LOWPASS_HZ: 3400,
+            VOICE_FILTER_Q: 0.7
+        };
+        const voiceConfig = { ...defaultVoiceConfig };
+        (async () => {
+            try {
+                const cfg = await import('/static/proctor_engine/config/detection_config.js');
+                Object.assign(voiceConfig, {
+                    VOICE_RMS_THRESHOLD: cfg.VOICE_RMS_THRESHOLD ?? voiceConfig.VOICE_RMS_THRESHOLD,
+                    VOICE_ZCR_MIN: cfg.VOICE_ZCR_MIN ?? voiceConfig.VOICE_ZCR_MIN,
+                    VOICE_ZCR_MAX: cfg.VOICE_ZCR_MAX ?? voiceConfig.VOICE_ZCR_MAX,
+                    VOICE_SPECTRAL_FLUX_THRESHOLD: cfg.VOICE_SPECTRAL_FLUX_THRESHOLD ?? voiceConfig.VOICE_SPECTRAL_FLUX_THRESHOLD,
+                    VOICE_EMA_ALPHA: cfg.VOICE_EMA_ALPHA ?? voiceConfig.VOICE_EMA_ALPHA,
+                    VOICE_COOLDOWN_MS: cfg.VOICE_COOLDOWN_MS ?? voiceConfig.VOICE_COOLDOWN_MS,
+                    VOICE_HIGHPASS_HZ: cfg.VOICE_HIGHPASS_HZ ?? voiceConfig.VOICE_HIGHPASS_HZ,
+                    VOICE_LOWPASS_HZ: cfg.VOICE_LOWPASS_HZ ?? voiceConfig.VOICE_LOWPASS_HZ,
+                    VOICE_FILTER_Q: cfg.VOICE_FILTER_Q ?? voiceConfig.VOICE_FILTER_Q
+                });
+            } catch (err) {
+                console.warn('Voice config import failed, using defaults', err);
+            }
+        })();
+
+        let voiceAudioCtx = null;
+        let voiceAnalyser = null;
+        let voiceHighpass = null;
+        let voiceLowpass = null;
+        let voiceSink = null;
+        const voiceStateByStudent = new Map();
+
+        function ensureVoiceAudioGraph() {
+            if (voiceAudioCtx) return true;
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) {
+                console.warn('AudioContext not available; voice detection disabled');
+                return false;
+            }
+            voiceAudioCtx = new AudioCtx({ sampleRate: 16000 });
+            voiceAnalyser = voiceAudioCtx.createAnalyser();
+            voiceAnalyser.fftSize = 1024;
+            voiceAnalyser.smoothingTimeConstant = 0;
+
+            voiceHighpass = voiceAudioCtx.createBiquadFilter();
+            voiceHighpass.type = 'highpass';
+            voiceHighpass.frequency.value = voiceConfig.VOICE_HIGHPASS_HZ;
+            voiceHighpass.Q.value = voiceConfig.VOICE_FILTER_Q;
+
+            voiceLowpass = voiceAudioCtx.createBiquadFilter();
+            voiceLowpass.type = 'lowpass';
+            voiceLowpass.frequency.value = voiceConfig.VOICE_LOWPASS_HZ;
+            voiceLowpass.Q.value = voiceConfig.VOICE_FILTER_Q;
+
+            // Chain: source -> highpass -> lowpass -> analyser
+            voiceHighpass.connect(voiceLowpass);
+            voiceLowpass.connect(voiceAnalyser);
+
+            // Silent sink so the graph processes without audible playback
+            voiceSink = voiceAudioCtx.createGain();
+            voiceSink.gain.value = 0;
+            voiceAnalyser.connect(voiceSink);
+            voiceSink.connect(voiceAudioCtx.destination);
+            return true;
+        }
+
+        function voiceStateFor(studentId) {
+            if (!voiceStateByStudent.has(studentId)) {
+                voiceStateByStudent.set(studentId, {
+                    prevSpectrum: null,
+                    smoothedRMS: 0,
+                    lastTriggerTime: 0
+                });
+            }
+            return voiceStateByStudent.get(studentId);
+        }
+
+        function renderVoiceUI(sid, speechDetected, metrics = {}) {
+            const voiceText = document.getElementById(`voice-text-${sid}`);
+            const voiceMeter = document.getElementById(`voice-meter-${sid}`);
+            const card = document.getElementById(`student-${sid}`);
+
+            if (voiceMeter) {
+                const level = Math.min(100, Math.round((metrics.smoothedRMS || 0) / (voiceConfig.VOICE_RMS_THRESHOLD * 3) * 100));
+                voiceMeter.style.width = `${isFinite(level) ? level : 0}%`;
+                voiceMeter.style.background = speechDetected ? '#ff4757' : '#6366f1';
+            }
+            if (voiceText) {
+                if (speechDetected) {
+                    voiceText.textContent = 'SPEECH DETECTED';
+                    voiceText.style.color = '#ff4757';
+                    voiceText.style.fontWeight = 'bold';
+                } else {
+                    voiceText.textContent = (metrics.rms ?? 0) > voiceConfig.VOICE_RMS_THRESHOLD ? 'Noise' : 'Quiet';
+                    voiceText.style.color = '';
+                    voiceText.style.fontWeight = '';
+                }
+            }
+            if (card) {
+                if (speechDetected) {
+                    card.classList.add('pulse-voice');
+                } else {
+                    card.classList.remove('pulse-voice');
+                }
+            }
+        }
+
+        function analyzeAudioFrame(buffer, sid) {
+            if (!voiceAnalyser || !buffer || buffer.length === 0) return;
+            const state = voiceStateFor(sid);
+
+            // Use filtered waveform from analyser; fall back to raw buffer
+            const timeData = new Float32Array(voiceAnalyser.fftSize);
+            voiceAnalyser.getFloatTimeDomainData(timeData);
+            const frame = timeData && timeData.length ? timeData : buffer;
+            const frameLen = frame.length;
+
+            // RMS with exponential smoothing
+            let sum = 0;
+            for (let i = 0; i < frameLen; i++) sum += frame[i] * frame[i];
+            const rms = frameLen ? Math.sqrt(sum / frameLen) : 0;
+            state.smoothedRMS = voiceConfig.VOICE_EMA_ALPHA * rms + (1 - voiceConfig.VOICE_EMA_ALPHA) * state.smoothedRMS;
+
+            // Zero Crossing Rate
+            let crossings = 0;
+            for (let i = 1; i < frameLen; i++) {
+                if ((frame[i] >= 0) !== (frame[i - 1] >= 0)) crossings++;
+            }
+            const zcr = frameLen ? crossings / frameLen : 0;
+
+            // Spectral flux
+            const freqData = new Uint8Array(voiceAnalyser.frequencyBinCount);
+            voiceAnalyser.getByteFrequencyData(freqData);
+            let flux = 0;
+            if (state.prevSpectrum) {
+                for (let i = 0; i < freqData.length; i++) {
+                    const diff = (freqData[i] - state.prevSpectrum[i]) / 255;
+                    flux += diff * diff;
+                }
+                flux = Math.sqrt(flux / freqData.length);
+            }
+            state.prevSpectrum = freqData.slice();
+
+            const now = Date.now();
+            const speechDetected =
+                state.smoothedRMS > voiceConfig.VOICE_RMS_THRESHOLD &&
+                zcr > voiceConfig.VOICE_ZCR_MIN && zcr < voiceConfig.VOICE_ZCR_MAX &&
+                flux > voiceConfig.VOICE_SPECTRAL_FLUX_THRESHOLD &&
+                (now - state.lastTriggerTime) > voiceConfig.VOICE_COOLDOWN_MS;
+
+            renderVoiceUI(sid, speechDetected, { rms, smoothedRMS: state.smoothedRMS, zcr, flux });
+
+            if (speechDetected) {
+                state.lastTriggerTime = now;
+                socket.emit('admin_trigger_voice_warning', {
+                    student_id: sid,
+                    rms: Number(state.smoothedRMS.toFixed(4)),
+                    zcr: Number(zcr.toFixed(4)),
+                    flux: Number(flux.toFixed(4))
+                });
+            }
+        }
+
         // --- Navigation Functions ---
         function goBack() {
-            // Redirects to the main Admin Dashboard (Student List)
-            window.location.href = '/adminStudents';
+            // Redirect to the main Admin Dashboard (Student List) without keeping an extra history entry
+            window.location.replace('/adminStudents');
         }
 
         function logout() {
@@ -668,6 +838,18 @@
             ensureAdminVerifierStarted();
         });
 
+        // Server-side object detection -> update banned labels immediately
+        socket.on('server_object_detected', function (data) {
+            const key = String(data.student_id);
+            if (!studentsData[key]) return;
+            const label = String(data.label || '').toLowerCase();
+            if (!label) return;
+            const arr = studentsData[key].banned_labels = studentsData[key].banned_labels || [];
+            if (!arr.includes(label)) arr.push(label);
+            studentsData[key].lastUpdate = Date.now();
+            updateDashboard(true);
+        });
+
         socket.on('disconnect', function () {
             console.log('❌ Disconnected from admin dashboard');
             // Keep UI healthy if polling APIs are still reachable.
@@ -687,7 +869,7 @@
             console.log('Server connection confirmed:', data);
         });
 
-        socket.on('student_telemetry_v2', function (data) {
+        function handleTelemetryUpdate(data) {
             const sid = String(data.student_id || '');
             if (!sid) return;
 
@@ -742,7 +924,7 @@
                 refreshStudentTelemetryRow(sid);
             }
 
-            if (Date.now() - lastDashboardUpdateAt > 1500) {
+            if (Date.now() - lastDashboardUpdateAt > 600) {
                 updateDashboard(false);
                 lastDashboardUpdateAt = Date.now();
             }
@@ -751,6 +933,15 @@
             if (currentStreamingStudent == sid) {
                 updateModalTelemetry(sid, data);
             }
+        }
+
+        socket.on('student_telemetry_v2', function (data) {
+            handleTelemetryUpdate(data);
+        });
+
+        socket.on('telemetry_update', function (payload) {
+            const data = (payload && payload.data) ? Object.assign({ student_id: payload.student_id }, payload.data) : payload;
+            handleTelemetryUpdate(data || {});
         });
 
         socket.on('tamper_review_flagged', function (data) {
@@ -997,6 +1188,12 @@
                 if (studentsData[key].violations.length > 3) {
                     studentsData[key].violations = studentsData[key].violations.slice(-3);
                 }
+                const vtype = String(data.violation.type || '').toUpperCase();
+                if (vtype === 'PROHIBITED_OBJECT') {
+                    const label = String(data.violation.details || data.details || '').toLowerCase();
+                    const arr = studentsData[key].banned_labels = studentsData[key].banned_labels || [];
+                    if (label && !arr.includes(label)) arr.push(label);
+                }
             }
             if (studentsData[key].warnings >= 3 && !studentsData[key].endTime) {
                 studentsData[key].endTime = Date.now();
@@ -1089,74 +1286,36 @@
             document.getElementById('modal-loading').style.display = 'none';
         });
 
-        // Handle feed errors
+        // Handle student audio relay
         socket.on('relay_student_audio', function (data) {
             const sid = String(data.student_id);
-            const buffer = data.audio; // Int16 AraryBuffer
-            
-            if (!this.studentVoiceStreaks) this.studentVoiceStreaks = {};
-            if (!this.voiceDetectionSettings) {
-                this.voiceDetectionSettings = {
-                    rmsThreshold: 180, // Sensitivity for relayed Int16 audio
-                    minDetectionStreak: 4, // Require 4 chunks ~400ms
-                    cooldownFrames: 30 // Prevents spam
-                };
-            }
+            const buffer = data.audio; // Int16 ArrayBuffer
+            if (!sid || !buffer) return;
+            if (!ensureVoiceAudioGraph()) return;
 
-            // Calculate RMS
+            if (voiceAudioCtx.state === 'suspended') voiceAudioCtx.resume();
+
+            // Convert Int16 PCM to Float32 [-1, 1]
             const int16 = new Int16Array(buffer);
-            let sum = 0;
-            for (let i = 0; i < int16.length; i++) sum += int16[i] * int16[i];
-            const rms = Math.sqrt(sum / int16.length);
-
-            // Streak logic
-            let streak = this.studentVoiceStreaks[sid] || 0;
-            if (rms > this.voiceDetectionSettings.rmsThreshold) {
-                streak++;
-            } else {
-                streak = Math.max(0, streak - 1);
+            const floatBuf = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) {
+                floatBuf[i] = int16[i] / 32768;
             }
-            this.studentVoiceStreaks[sid] = streak;
 
-            if (streak >= this.voiceDetectionSettings.minDetectionStreak) {
-                // Trigger Warning back to student via server
-                socket.emit('admin_trigger_voice_warning', {
-                    student_id: sid,
-                    rms: Math.round(rms)
-                });
-                // Visual feedback on admin card
-                const voiceText = document.getElementById(`voice-text-${sid}`);
-                const voiceMeter = document.getElementById(`voice-meter-${sid}`);
-                const card = document.getElementById(`student-${sid}`);
-                
-                if (voiceText) {
-                    voiceText.textContent = "SPEECH DETECTED";
-                    voiceText.style.color = "#ff4757";
-                    voiceText.style.fontWeight = "bold";
-                    setTimeout(() => {
-                        voiceText.textContent = "Quiet";
-                        voiceText.style.color = "";
-                        voiceText.style.fontWeight = "";
-                    }, 3000);
-                }
-                if (voiceMeter) {
-                    voiceMeter.style.width = "100%";
-                    voiceMeter.style.background = "#ff4757";
-                    setTimeout(() => {
-                        voiceMeter.style.width = "0%";
-                        voiceMeter.style.background = "";
-                    }, 3000);
-                }
-                if (card) {
-                    card.classList.add('threat-pulse');
-                    setTimeout(() => card.classList.remove('threat-pulse'), 2000);
-                }
-                showAlert(`🎙️ Voice detected for ${sid}`, 'warning');
-                // Reset to cooldown
-                this.studentVoiceStreaks[sid] = -this.voiceDetectionSettings.cooldownFrames;
-            }
+            // Push through the filter chain for analyser data
+            const audioBuffer = voiceAudioCtx.createBuffer(1, floatBuf.length, voiceAudioCtx.sampleRate);
+            audioBuffer.copyToChannel(floatBuf, 0);
+            const source = voiceAudioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            // Chain: source -> highpass -> lowpass -> analyser
+            source.connect(voiceHighpass);
+            source.start();
+            source.onended = () => source.disconnect();
+
+            // Run analysis on this frame
+            requestAnimationFrame(() => analyzeAudioFrame(floatBuf, sid));
         });
-
+        // Handle feed errors
         socket.on('feed_error', function (data) {
             console.log('❌ Feed error:', data);
             document.getElementById('modal-loading').innerHTML =
@@ -1443,7 +1602,7 @@
             // Show detected objects & Behavioral Flags
             const objectsEl = document.getElementById(`objects-${sid}`);
             if (objectsEl) {
-                const banned = student.banned_labels || [];
+                const banned = (Array.isArray(student.banned_labels) && student.banned_labels.length>0) ? student.banned_labels : (Array.isArray(student.metrics?.banned_labels) ? student.metrics.banned_labels : []);
                 const flags = student.active_flags || [];
                 const parts = [];
                 // Prioritize banned objects in the secondary colored area
@@ -1790,7 +1949,7 @@
 
         function doTelemetryOnlyCheck(sid, studentName, student, latest) {
             const score = student.suspicion_score || 0;
-            const banned = student.banned_labels || [];
+            const banned = (Array.isArray(student.banned_labels) && student.banned_labels.length>0) ? student.banned_labels : (Array.isArray(student.metrics?.banned_labels) ? student.metrics.banned_labels : []);
             const flags = student.active_flags || [];
             const faces = student.face_count;
 
@@ -1800,7 +1959,7 @@
             if (faces === 0) issues.push('No face detected');
             if (faces > 1) issues.push(`${faces} faces detected`);
             if (flags.includes('LOOKING_AWAY')) issues.push('Looking away');
-            if (flags.includes('PHONE_DETECTED') || flags.includes('BOOK_DETECTED')) issues.push('Prohibited object');
+            if (flags.includes('PHONE_DETECTED') || flags.includes('BOOK_DETECTED') || banned.length>0) issues.push('Prohibited object: ' + (banned.join(', ') || 'detected'));
 
             const verdict = issues.length === 0 ? '✅ No issues found' : `🚨 ${issues.length} issue(s) found`;
             const alertType = issues.length === 0 ? 'success' : 'danger';
@@ -1834,7 +1993,7 @@
                     pitch: Math.round(student.metrics?.pitch_deg || 0),
                     gaze: (student.metrics?.gaze_offset || 0).toFixed(2),
                     voice_level: student.metrics?.voice_threat_level || 0,
-                    objects: student.banned_labels || []
+                    objects: (student.banned_labels && student.banned_labels.length ? student.banned_labels : (student.metrics?.banned_labels || []))
                 };
 
                 socket.emit('admin_notify_student', {
@@ -1854,7 +2013,7 @@
                     warnings: student.warnings || 0,
                     violations: student.violations?.length || 0,
                     max_suspicion: student.suspicion_score || 0,
-                    detected_objects: student.banned_labels || []
+                    detected_objects: (student.banned_labels && student.banned_labels.length ? student.banned_labels : (student.metrics?.banned_labels || []))
                 } : {};
 
                 socket.emit('force_terminate_exam', {
@@ -1997,3 +2156,6 @@
 </body>
 
 </html>
+
+
+
