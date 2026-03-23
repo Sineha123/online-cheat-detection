@@ -2640,12 +2640,12 @@
             started: false,
             cooldownUntil: 0,
             speakingSince: 0,
-            minSpeechMs: 200,           // sustained speech trigger (fast)
-            longSpeechMs: 450,          // long continuous speech trigger
+            minSpeechMs: 800,           // require ~1s sustained speech before considering it talking
+            longSpeechMs: 1500,         // long continuous speech trigger at 1.5s
             cumulativeSpeechMs: 0,      // rolling talk-time bucket
-            bucketWindowMs: 12000,
+            bucketWindowMs: 15000,      // 15s analysis window
             bucketResetAt: 0,
-            minRms: 0.003,
+            minRms: 0.012,              // 4× higher floor — filters keyboard clicks, breathing
             noiseFloor: null,
             micWarnCooldownUntil: 0,
             audioTrack: null,
@@ -2698,10 +2698,11 @@
                         try { await this.context.resume(); } catch (_) { }
                     }
                     this.analyser = this.context.createAnalyser();
-                    this.analyser.fftSize = 1024;
+                    this.analyser.fftSize = 2048;  // higher FFT for better frequency resolution
+                    this.analyser.smoothingTimeConstant = 0.3;  // less smoothing for sharper detection
                     this.source = this.context.createMediaStreamSource(this.stream);
                     this.source.connect(this.analyser);
-                    this.calibrationUntil = Date.now() + 300; // short 300ms ambient calibration only
+                    this.calibrationUntil = Date.now() + 2000; // 2s ambient calibration for stable noise floor
 
                     // Record complete mic audio for admin recordings evidence.
                     if (typeof MediaRecorder !== 'undefined') {
@@ -2743,6 +2744,49 @@
                 }
             },
 
+            /**
+             * Compute spectral flatness (Wiener entropy) over a frequency sub-band.
+             * Returns 0-1 where:
+             *   ~0.0-0.3 = tonal / harmonic (human voice)
+             *   ~0.7-1.0 = noise-like (keyboard, fan, ambient)
+             */
+            _spectralFlatness(freqBuf, hzPerBin, loHz, hiHz) {
+                let logSum = 0, linSum = 0, count = 0;
+                for (let i = 0; i < freqBuf.length; i++) {
+                    const hz = i * hzPerBin;
+                    if (hz < loHz || hz > hiHz) continue;
+                    const val = Math.max(freqBuf[i], 1);  // avoid log(0)
+                    logSum += Math.log(val);
+                    linSum += val;
+                    count++;
+                }
+                if (count === 0 || linSum === 0) return 1.0;  // no data = noise-like
+                const geometricMean = Math.exp(logSum / count);
+                const arithmeticMean = linSum / count;
+                return Math.min(1.0, geometricMean / arithmeticMean);
+            },
+
+            /**
+             * Count prominent harmonic peaks in the speech frequency band.
+             * Human voice produces clear harmonic peaks (formants); noise does not.
+             */
+            _countHarmonicPeaks(freqBuf, hzPerBin, loHz, hiHz) {
+                let peaks = 0;
+                const minBin = Math.max(2, Math.floor(loHz / hzPerBin));
+                const maxBin = Math.min(freqBuf.length - 2, Math.ceil(hiHz / hzPerBin));
+                // Compute mean energy in band for dynamic threshold
+                let bandSum = 0, bandCount = 0;
+                for (let i = minBin; i <= maxBin; i++) { bandSum += freqBuf[i]; bandCount++; }
+                const bandMean = bandCount > 0 ? (bandSum / bandCount) : 0;
+                const peakThresh = Math.max(bandMean * 1.5, 15); // peak must be 1.5× above mean
+                for (let i = minBin + 1; i < maxBin; i++) {
+                    if (freqBuf[i] > freqBuf[i - 1] && freqBuf[i] > freqBuf[i + 1] && freqBuf[i] >= peakThresh) {
+                        peaks++;
+                    }
+                }
+                return peaks;
+            },
+
             loop() {
                 if (!this.analyser) return;
                 const timeBuf = new Float32Array(this.analyser.fftSize);
@@ -2759,27 +2803,37 @@
                     this.analyser.getFloatTimeDomainData(timeBuf);
                     this.analyser.getByteFrequencyData(freqBuf);
 
+                    // --- RMS energy ---
                     let sum = 0;
                     for (let i = 0; i < timeBuf.length; i++) sum += timeBuf[i] * timeBuf[i];
                     const rms = Math.sqrt(sum / timeBuf.length);
 
+                    // --- Frequency analysis ---
                     const nyquist = (this.context.sampleRate || 44100) / 2;
                     const hzPerBin = nyquist / freqBuf.length;
                     let total = 0;
-                    let speechBand = 0;   // ~human voice dominant band
-                    let lowWindBand = 0;  // wind/hum mostly low-frequency
+                    let speechBand = 0;   // human voice dominant band 85-3000 Hz
+                    let lowWindBand = 0;  // wind/hum mostly 20-80 Hz
+                    let highNoiseBand = 0; // keyboard clicks often 4000-8000+ Hz
                     for (let i = 0; i < freqBuf.length; i++) {
                         const hz = i * hzPerBin;
                         const e = freqBuf[i];
                         total += e;
                         if (hz >= 85 && hz <= 3000) speechBand += e;
                         if (hz >= 20 && hz <= 80) lowWindBand += e;
+                        if (hz >= 4000 && hz <= 10000) highNoiseBand += e;
                     }
                     const speechRatio = total > 0 ? (speechBand / total) : 0;
                     const windRatio = total > 0 ? (lowWindBand / total) : 0;
+                    const highNoiseRatio = total > 0 ? (highNoiseBand / total) : 0;
+
+                    // --- Noise floor tracking (adaptive) ---
                     if (this.noiseFloor == null) this.noiseFloor = rms;
                     else this.noiseFloor = (0.97 * this.noiseFloor) + (0.03 * rms);
-                    const dynRmsThreshold = Math.max(this.minRms, this.noiseFloor * 1.1);
+                    const dynRmsThreshold = Math.max(this.minRms, this.noiseFloor * 1.8);
+                    // noise floor multiplier raised from 1.1→1.8: signal must be well above ambient
+
+                    // --- Zero crossing rate ---
                     let zc = 0;
                     for (let i = 1; i < timeBuf.length; i++) {
                         const a = timeBuf[i - 1];
@@ -2787,6 +2841,8 @@
                         if ((a >= 0 && b < 0) || (a < 0 && b >= 0)) zc++;
                     }
                     const zcr = zc / Math.max(1, timeBuf.length - 1);
+
+                    // --- Dominant frequency ---
                     let domIdx = 0;
                     let domVal = -1;
                     for (let i = 0; i < freqBuf.length; i++) {
@@ -2796,14 +2852,33 @@
                         }
                     }
                     const dominantHz = domIdx * hzPerBin;
+
+                    // === NEW: Spectral Flatness (key voice vs noise discriminator) ===
+                    // Voice is tonal → low flatness (~0.1-0.3)
+                    // Noise/clicks are broadband → high flatness (~0.7-1.0)
+                    const spectralFlat = this._spectralFlatness(freqBuf, hzPerBin, 85, 3000);
+
+                    // === NEW: Harmonic peak count in speech band ===
+                    // Human voice produces 3+ distinct harmonic peaks (fundamental + formants)
+                    // Keyboard clicks and ambient noise produce 0-1 peaks
+                    const harmonicPeaks = this._countHarmonicPeaks(freqBuf, hzPerBin, 85, 3000);
+
+                    // --- Classification gates ---
                     const inCalibration = Date.now() < this.calibrationUntil;
-                    const energyGate = rms >= dynRmsThreshold;
-                    const speechBandGate = speechRatio >= 0.15 && speechBand >= 8;
-                    const frequencyGate = dominantHz >= 70 && dominantHz <= 3400;
-                    const nonWindGate = windRatio <= 0.75;
-                    const zcrGate = zcr >= 0.001 && zcr <= 0.50;
-                    const backupVoiceGate = (rms >= (dynRmsThreshold * 1.2)) && (speechRatio >= 0.12);
-                    const looksLikeHumanVoice = (!inCalibration) && ((energyGate && speechBandGate && frequencyGate && nonWindGate && zcrGate) || backupVoiceGate);
+                    const energyGate = rms >= dynRmsThreshold;         // strong enough signal
+                    const speechBandGate = speechRatio >= 0.30 && speechBand >= 20; // raised from 0.15/8
+                    const frequencyGate = dominantHz >= 85 && dominantHz <= 3000;    // tighter: 85-3000 not 70-3400
+                    const nonWindGate = windRatio <= 0.60;             // tighter wind rejection
+                    const zcrGate = zcr >= 0.005 && zcr <= 0.40;      // tighter ZCR (voice: 0.01-0.35)
+                    const flatnessGate = spectralFlat <= 0.45;         // key: voice is tonal, not flat
+                    const harmonicGate = harmonicPeaks >= 3;           // voice has 3+ harmonic peaks
+                    const notKeyboardGate = highNoiseRatio <= 0.25;    // reject high-freq click-heavy sounds
+
+                    // Final classification: ALL primary gates must pass
+                    const looksLikeHumanVoice = (!inCalibration) &&
+                        energyGate && speechBandGate && frequencyGate &&
+                        nonWindGate && zcrGate && flatnessGate && harmonicGate && notKeyboardGate;
+                    // No backup gate — the old backup path caused most false positives
 
                     const now = Date.now();
                     if (now - this.lastAudioDebugAt >= 2000) {
@@ -2812,8 +2887,11 @@
                             dyn: Number(dynRmsThreshold.toFixed(4)),
                             speechRatio: Number(speechRatio.toFixed(2)),
                             windRatio: Number(windRatio.toFixed(2)),
+                            highNoiseRatio: Number(highNoiseRatio.toFixed(2)),
                             zcr: Number(zcr.toFixed(3)),
                             dominantHz: Number(dominantHz.toFixed(1)),
+                            flatness: Number(spectralFlat.toFixed(3)),
+                            peaks: harmonicPeaks,
                             voiceLike: looksLikeHumanVoice
                         });
                         this.lastAudioDebugAt = now;
@@ -2835,8 +2913,8 @@
 
                         const sustainedTalking = speechMs >= this.minSpeechMs;
                         const veryLongTalking = speechMs >= this.longSpeechMs;
-                        const repeatedTalking = this.cumulativeSpeechMs >= 500;
-                        const enoughVoicedFrames = this.voicedFrames >= 2;
+                        const repeatedTalking = this.cumulativeSpeechMs >= 1500;  // raised from 500ms
+                        const enoughVoicedFrames = this.voicedFrames >= 4;        // raised from 2
 
                         if (((sustainedTalking && (repeatedTalking || enoughVoicedFrames)) || veryLongTalking) && now >= this.cooldownUntil) {
                             this.cooldownUntil = now + 4000;  // 4s between voice warnings
@@ -2853,7 +2931,7 @@
                         }
                     } else {
                         this.missFrames += 1;
-                        if (this.missFrames >= 3) this.speakingSince = 0;
+                        if (this.missFrames >= 5) this.speakingSince = 0;  // raised from 3
                         this.voicedFrames = Math.max(0, this.voicedFrames - 1);
                     }
                 }, 150);

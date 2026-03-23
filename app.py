@@ -105,7 +105,7 @@ except Exception as e:
     MEDIAPIPE_AVAILABLE = False
     logger.warning(f"MediaPipe FaceMesh unavailable: {e}. Install with: pip install mediapipe")
 
-# PyTorch + Ultralytics YOLOv8 (optional but recommended)
+# PyTorch + Ultralytics YOLOv11 (optional but recommended)
 try:
     import torch
     TORCH_AVAILABLE = True
@@ -491,17 +491,16 @@ HAAR_PATH = os.path.join('Haarcascades', 'haarcascade_frontalface_default.xml')
 HAAR_PROFILE_PATH = os.path.join('Haarcascades', 'haarcascade_profileface.xml')
 ENCODINGS_DIR = os.path.join('static', 'face_encodings')
 
+# # ============================================================================
+# YOLOv11 Object Detection — Single Source of Truth
+# The actual model is loaded ONCE in person_pipeline.py (PersonDetector).
+# All detection goes through PersonDetector.process_frame().
+# These stubs keep legacy imports happy without loading a second model.
 # ============================================================================
-# YOLOv8 Object Detection Setup
-# ============================================================================
-YOLO_DEFAULT_MODEL = 'yolov8n.pt'
-YOLO_CUSTOM_MODEL = os.getenv('YOLO_MODEL_PATH', '').strip()
 YOLO_CONF_THRESHOLD = float(os.getenv('YOLO_CONF_THRESHOLD', '0.22'))
 YOLO_IMG_SIZE = int(os.getenv('YOLO_IMG_SIZE', '640'))
 OBJECT_VIOLATION_COOLDOWN_SEC = float(os.getenv('OBJECT_VIOLATION_COOLDOWN_SEC', '3.5'))
-DNN_OBJECT_FALLBACK_ENABLED = (os.getenv('DNN_OBJECT_FALLBACK_ENABLED', '1') == '1')
 OCR_OBJECT_FALLBACK_ENABLED = (os.getenv('OCR_OBJECT_FALLBACK_ENABLED', '0') == '1')
-# Enable phone shape fallback so smooth/low-texture phones still trigger.
 PHONE_CONTOUR_FALLBACK_ENABLED = (os.getenv('PHONE_CONTOUR_FALLBACK_ENABLED', '1') == '1')
 
 # # Objects that are prohibited during exam
@@ -530,7 +529,7 @@ def _normalize_label(label):
         'copy': 'book',
         'paper': 'book',
         'document': 'book',
-        'earphone': 'earphones',
+        'earphone': 'earbuds',
         'earbud': 'earbuds',
         'headphone': 'headphones',
         'headset': 'headphones',
@@ -586,82 +585,41 @@ if CV2_AVAILABLE:
     except Exception:
         people_hog = None
 
-# ── Load YOLOv4-tiny ──────────────────────────────────────────────────────────
+# ── Shared YOLOv11 engine (loaded once in person_pipeline.py) ─────────────────
+# Legacy stubs — kept so admin_live_monitoring.py's imports don't break.
 object_net = None
-object_net_enabled = False
+object_net_enabled = True  # The shared PersonDetector loads the model
 yolo_class_names = {}
 prohibited_class_ids = []
 yolo_infer_lock = threading.Lock()
 yolo_device = 'cpu'
 yolo_loaded_model_path = None
 
-if ULTRALYTICS_AVAILABLE:
-    try:
-        model_candidates = []
-        if YOLO_CUSTOM_MODEL:
-            model_candidates.append(YOLO_CUSTOM_MODEL)
-        model_candidates.extend([
-            os.path.join('models', 'best.pt'),
-            os.path.join('models', 'custom.pt'),
-            os.path.join('models', 'yolov8n.pt'),
-            YOLO_DEFAULT_MODEL
-        ])
-
-        resolved_model = None
-        for candidate in model_candidates:
-            if candidate == YOLO_DEFAULT_MODEL or os.path.exists(candidate):
-                resolved_model = candidate
-                break
-        if resolved_model is None:
-            resolved_model = YOLO_DEFAULT_MODEL
-
-        object_net = YOLO(resolved_model)
-        yolo_loaded_model_path = resolved_model
-        if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
-            yolo_device = 'cuda:0'
-        else:
-            yolo_device = 'cpu'
-        object_net.to(yolo_device)
-
-        names = getattr(object_net, 'names', {})
-        if isinstance(names, dict):
-            yolo_class_names = {int(k): str(v) for k, v in names.items()}
-        elif isinstance(names, list):
-            yolo_class_names = {int(i): str(v) for i, v in enumerate(names)}
-        else:
-            yolo_class_names = {}
-
-        prohibited_class_ids = [
-            cls_id for cls_id, cls_name in yolo_class_names.items()
-            if _label_is_prohibited(cls_name)
-        ]
-
-        # Fallback: hardcode known COCO class IDs for prohibited objects
-        # so detection works even if label name matching missed something.
-        COCO_PROHIBITED_IDS = [
-            63,  # laptop
-            67,  # cell phone
-            72,  # tv
-            73,  # book
-            74,  # mouse
-            75,  # remote
-            76,  # keyboard
-            85,  # clock (watch)
-        ]
-        for cid in COCO_PROHIBITED_IDS:
-            if cid in yolo_class_names and cid not in prohibited_class_ids:
-                prohibited_class_ids.append(cid)
-                logger.info(f"Added COCO fallback prohibited class: {cid}={yolo_class_names[cid]}")
-
-        object_net_enabled = True
-        logger.info(
-            f"YOLOv8 loaded from '{resolved_model}' on '{yolo_device}' "
-            f"(prohibited classes mapped: {prohibited_class_ids})"
-        )
-    except Exception as e:
-        object_net_enabled = False
-        object_net = None
-        logger.error(f"Error loading YOLOv8 model: {e}", exc_info=True)
+try:
+    from person_pipeline import PersonDetector as _PersonDetectorShared
+    from person_pipeline import _global_yolo_model as _shared_yolo_model
+    object_net = _shared_yolo_model   # point stub at shared model
+    import config_vision as _cv
+    yolo_loaded_model_path = getattr(_cv, 'YOLO_MODEL_PATH', 'models/yolov11m.pt')
+    names = getattr(_shared_yolo_model, 'names', {})
+    if isinstance(names, dict):
+        yolo_class_names = {int(k): str(v) for k, v in names.items()}
+    elif isinstance(names, list):
+        yolo_class_names = {int(i): str(v) for i, v in enumerate(names)}
+    prohibited_class_ids = [
+        cls_id for cls_id, cls_name in yolo_class_names.items()
+        if _label_is_prohibited(cls_name)
+    ]
+    if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
+        yolo_device = 'cuda:0'
+    logger.info(
+        f"YOLOv11 shared engine from person_pipeline.py on '{yolo_device}' "
+        f"(prohibited classes mapped: {prohibited_class_ids})"
+    )
+except Exception as e:
+    object_net_enabled = False
+    object_net = None
+    logger.error(f"Error linking shared YOLOv11 engine: {e}", exc_info=True)
 
 # Optional GroundingDINO secondary detector (text-guided for small/rare objects)
 GROUNDING_ENABLED = False
@@ -739,7 +697,7 @@ GAZE_VERT_THRESH = float(os.getenv('GAZE_VERT_THRESH', '0.35'))
 HEAD_YAW_LIMIT = float(os.getenv('HEAD_YAW_LIMIT', '30.0'))
 HEAD_PITCH_UP_LIMIT = float(os.getenv('HEAD_PITCH_UP_LIMIT', '20.0'))
 HEAD_PITCH_DOWN_LIMIT = float(os.getenv('HEAD_PITCH_DOWN_LIMIT', '-20.0'))
-GAZE_TIME_THRESHOLD = float(os.getenv('GAZE_TIME_THRESHOLD', '3.0'))
+GAZE_TIME_THRESHOLD = float(os.getenv('GAZE_TIME_THRESHOLD', '2.5'))
 GAZE_SMOOTH_FRAMES = int(os.getenv('GAZE_SMOOTH_FRAMES', '5'))
 GAZE_PROCESS_EVERY_N = int(os.getenv('GAZE_PROCESS_EVERY_N', '2'))
 GAZE_DEBUG = (os.getenv('GAZE_DEBUG', '0') == '1')
@@ -753,7 +711,7 @@ DEBUG_PATH = os.getenv('DEBUG_PATH', 'debug')
 # Thresholds for Eye Tracking
 EAR_THRESHOLD = 0.23                          # Lower = less sensitive to normal blinks, only detects sustained close
 EYES_CLOSED_SECONDS = float(os.getenv('EYES_CLOSED_SECONDS', '1.5'))   # 1.5s closed eyes → warning
-LOOKING_AWAY_SECONDS = float(os.getenv('LOOKING_AWAY_SECONDS', '4.0'))  # 4s looking away → warning
+LOOKING_AWAY_SECONDS = float(os.getenv('LOOKING_AWAY_SECONDS', '2.5'))  # 2.5s looking away → warning
 NO_FACE_SECONDS = float(os.getenv('NO_FACE_SECONDS', '0.5'))           # 0.5s no face → warning
 SEAT_RISE_RATIO_THRESHOLD = 0.34
 LEAN_RATIO_THRESHOLD = 0.24
@@ -1270,7 +1228,7 @@ def _trigger_violation(student_id, student_name, violation_type, details, cooldo
         # Add external penalties not caught by vision engine directly
         external_penalty = 0
         if vtype == 'VOICE_DETECTED':
-            external_penalty = 25
+            external_penalty = 10
         elif vtype == 'CAMERA_OFF':
             external_penalty = 20
             
@@ -1646,181 +1604,48 @@ OBJECT_CONSEC_FRAMES = int(os.getenv('OBJECT_CONSEC_FRAMES', '8'))
 
 def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
     """
-    Detect prohibited objects using YOLOv8.
-    Returns list of dicts: {label, confidence, x, y, w, h}
+    Detect prohibited objects — delegates to the shared PersonDetector (YOLOv11)
+    from person_pipeline.py.  This wrapper maintains API compatibility for any
+    remaining callers while ensuring a SINGLE detection pipeline.
+    Returns list of dicts: {label, confidence, x, y, w, h, is_prohibited}
     """
     if not CV2_AVAILABLE or frame is None:
         return []
-
     try:
+        from person_pipeline import PersonDetector
+        _detector = PersonDetector()
+        result = _detector.process_frame(frame)
         detections = []
-        h, w = frame.shape[:2]
-
-        def _predict(source_frame, threshold):
-            t0 = time.time()
-            with yolo_infer_lock:
-                res = object_net.predict(
-                    source=source_frame,
-                    conf=float(threshold),
-                    imgsz=int(YOLO_IMG_SIZE),
-                    device=yolo_device,
-                    classes=target_classes,
-                    verbose=False,
-                    max_det=12
-                )
-            if PERF_DEBUG:
-                logger.info(f"[perf-obj] infer={(time.time()-t0):.3f}s")
-            return res
-
-        if object_net_enabled and object_net is not None:
-            target_classes = list(set(prohibited_class_ids + [0])) if prohibited_class_ids else [0]
-            results = _predict(frame, conf_threshold)
-
-            # Low-light handheld objects often fail on the raw webcam frame.
-            # Retry once with a brighter, contrast-enhanced view before giving up.
-            if (not results or getattr(results[0], 'boxes', None) is None or len(getattr(results[0].boxes, 'cls', [])) == 0) and CV2_AVAILABLE:
-                try:
-                    ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-                    y, cr, cb = cv2.split(ycrcb)
-                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                    y = clahe.apply(y)
-                    enhanced = cv2.merge((y, cr, cb))
-                    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_YCrCb2BGR)
-                    enhanced = cv2.convertScaleAbs(enhanced, alpha=1.18, beta=14)
-                    results = _predict(enhanced, max(0.10, float(conf_threshold) * 0.75))
-                except Exception:
-                    pass
-
-            if results:
-                res = results[0]
-                boxes = getattr(res, 'boxes', None)
-                if boxes is not None:
-                    for box in boxes:
-                        cls_id = int(box.cls[0].item()) if box.cls is not None else -1
-                        score = float(box.conf[0].item()) if box.conf is not None else 0.0
-                        if score < float(conf_threshold):
-                            continue
-
-                        raw_label = yolo_class_names.get(cls_id, str(cls_id))
-                        label = _normalize_label(raw_label)
-                        if not include_visual_classes and not _label_is_prohibited(label):
-                            continue
-
-                        xyxy = box.xyxy[0].tolist()
-                        x1 = max(0, min(int(xyxy[0]), w - 1))
-                        y1 = max(0, min(int(xyxy[1]), h - 1))
-                        x2 = max(0, min(int(xyxy[2]), w))
-                        y2 = max(0, min(int(xyxy[3]), h))
-                        bw = max(1, x2 - x1)
-                        bh = max(1, y2 - y1)
-
-                        # Label-specific thresholds to balance recall vs false positives
-                        min_conf = OBJECT_MIN_CONFIDENCE
-                        min_area = OBJECT_MIN_AREA_RATIO
-                        max_area = OBJECT_MAX_AREA_RATIO
-                        min_edge = OBJECT_MIN_EDGE_DENSITY
-                        tex_min = OBJECT_MIN_TEXTURE_VAR
-
-                        if label == 'cell phone':
-                            min_conf = 0.52
-                            min_area = 0.005   # allow smaller phones
-                            min_edge = 0.003   # phones can be flat/shiny
-                            tex_min = 40.0
-                        elif label == 'book':
-                            # Stricter to avoid flat walls/whiteboards being tagged as "book"/"paper"
-                            min_conf = max(min_conf, 0.65)
-                            min_area = max(min_area, 0.022)
-                            max_area = min(max_area, 0.15)
-                            min_edge = max(min_edge, 0.060)
-                            tex_min = max(tex_min, 220.0)
-                            aspect = float(bw) / float(max(1, bh))
-                            if aspect < 0.55 or aspect > 1.80:
-                                continue
-
-                        area_ratio = float(bw * bh) / float(max(1, w * h))
-
-                        if score < min_conf:
-                            continue
-                        if area_ratio < min_area or area_ratio > max_area:
-                            continue
-
-                        # Texture filter: discard very flat regions (walls/blank background)
-                        try:
-                            roi = frame[y1:y2, x1:x2]
-                            if roi is not None and roi.size > 0 and CV2_AVAILABLE:
-                                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                                tex_var = cv2.Laplacian(gray_roi, cv2.CV_64F).var()
-                                edges = cv2.Canny(gray_roi, 60, 160)
-                                edge_density = float(cv2.countNonZero(edges)) / float(gray_roi.size)
-                                # Stricter for flat/book-like labels: need both texture + edges
-                                edge_thresh = min_edge
-                                tex_thresh = tex_min
-                                if label == 'book':
-                                    edge_thresh = max(edge_thresh, 0.060)
-                                    tex_thresh = max(tex_thresh, 220.0)
-                                    mean_val = float(np.mean(gray_roi))
-                                    std_val = float(np.std(gray_roi))
-                                    # Reject nearly uniform or very bright patches (walls/whiteboards)
-                                    if mean_val > 195.0 and std_val < 26.0:
-                                        continue
-                                    # Reject very dark low-entropy regions (headboards, shadows)
-                                    if mean_val < 60.0 and std_val < 28.0:
-                                        continue
-                                    # Simple entropy check to avoid flat textures
-                                    hist = cv2.calcHist([gray_roi],[0],None,[32],[0,256])
-                                    hist = hist / (gray_roi.size or 1)
-                                    entropy = -np.sum(hist * (np.log(hist + 1e-9)))
-                                    if entropy < 3.2:
-                                        continue
-                                if tex_var < tex_thresh or edge_density < edge_thresh:
-                                    continue
-                        except Exception:
-                            pass
-
-                        detections.append({
-                            'label': label,
-                            'confidence': score,
-                            'x': x1,
-                            'y': y1,
-                            'w': bw,
-                            'h': bh,
-                            'is_prohibited': _label_is_prohibited(label)
-                        })
-
-        # Secondary detector (GroundingDINO) for small/rare items
-        gd_dets = _detect_with_grounding_dino(frame)
-        if gd_dets:
-            for gd in gd_dets:
-                if not any(_bbox_iou(gd, d) > 0.5 and _normalize_label(gd['label']) == _normalize_label(d['label']) for d in detections):
-                    detections.append(gd)
-
-        if OCR_OBJECT_FALLBACK_ENABLED:
-            ocr_hits = _detect_prohibited_text(frame)
-            if ocr_hits:
-                detections.extend(ocr_hits)
-        if PHONE_CONTOUR_FALLBACK_ENABLED and not any(_label_is_prohibited(d.get('label', '')) for d in detections):
-            detections.extend(_detect_phone_like_contours(frame))
-
-        filtered = []
-        for detection in detections:
-            label = _normalize_label(detection.get('label', ''))
-            if not _label_is_prohibited(label):
+        for obj in result.get('prohibited_objects', []):
+            label = _normalize_label(obj.get('label', ''))
+            if not include_visual_classes and not _label_is_prohibited(label):
                 continue
-            normalized_detection = dict(detection)
-            normalized_detection['label'] = label
-            # Absolute pixel-area guard
-            if normalized_detection['w'] * normalized_detection['h'] < OBJECT_MIN_PIXELS:
-                continue
-            # Ignore detections near the top edge (walls/ceiling)
-            cy = normalized_detection['y'] + normalized_detection['h'] * 0.5
-            if h > 0 and cy < h * OBJECT_TOP_IGNORE_RATIO:
-                continue
-            filtered.append(normalized_detection)
-            if OBJECT_DEBUG:
-                logger.info(f"[obj] label={label} conf={normalized_detection.get('confidence',0):.2f} box=({normalized_detection['x']},{normalized_detection['y']},{normalized_detection['w']},{normalized_detection['h']})")
-        return filtered
+            detections.append({
+                'label': label,
+                'confidence': obj.get('confidence', 0.0),
+                'x': obj.get('x', 0),
+                'y': obj.get('y', 0),
+                'w': obj.get('w', 0),
+                'h': obj.get('h', 0),
+                'is_prohibited': True
+            })
+        if include_visual_classes:
+            for obj in result.get('all_objects', []):
+                label = _normalize_label(obj.get('label', ''))
+                if any(d['x'] == obj.get('x') and d['y'] == obj.get('y') for d in detections):
+                    continue
+                detections.append({
+                    'label': label,
+                    'confidence': obj.get('confidence', 0.0),
+                    'x': obj.get('x', 0),
+                    'y': obj.get('y', 0),
+                    'w': obj.get('w', 0),
+                    'h': obj.get('h', 0),
+                    'is_prohibited': _label_is_prohibited(label)
+                })
+        return detections
     except Exception as e:
-        logger.error(f"Error in YOLOv8 object detection: {e}", exc_info=True)
+        logger.error(f"Error in YOLOv11 object detection wrapper: {e}", exc_info=True)
         return []
 
 def _majority_vote(items):
@@ -1857,7 +1682,8 @@ def _classify_gaze(iris_offset, yaw, pitch, ear, face_detected):
 
 def _update_gaze_state(student_id, student_name, iris_offset, yaw, pitch, ear, face_detected, frame_seq):
     """
-    Temporal smoothing + 3s timer before emitting distraction warnings.
+    Temporal smoothing + 2.5s timer before emitting distraction warnings.
+    Iris offset + head yaw/pitch → gaze direction → sustained off-screen → warning.
     """
     sid = str(student_id)
     with student_detection_state_lock:
@@ -4416,7 +4242,7 @@ def api_object_detection_status():
     """Return status of object detection model"""
     return jsonify({
         'enabled': object_net_enabled,
-        'model': 'YOLOv8' if object_net_enabled else 'Not loaded',
+        'model': 'YOLOv11' if object_net_enabled else 'Not loaded',
         'model_path': yolo_loaded_model_path,
         'device': yolo_device,
         'prohibited_labels': list(PROHIBITED_LABELS),

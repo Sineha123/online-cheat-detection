@@ -84,7 +84,17 @@ class DecisionEngine:
             active_alerts.append("Face not detected")
             penalty_increment += 20
 
-        # Gaze off-screen handled in app.py with smoothing/timers; skip here to avoid duplicates.
+        # Rule 1b - Gaze off-screen (iris offset exceeds threshold for TIME_GAZING seconds)
+        gaze_horiz_thresh = getattr(config, 'IRIS_OFFSET_THRESHOLD', 0.18)
+        gaze_vert_thresh = getattr(config, 'IRIS_OFFSET_THRESHOLD_Y', 0.45)
+        gaze_off = (abs(iris_x) > gaze_horiz_thresh) or (abs(iris_y) > gaze_vert_thresh)
+        if self._check_condition(state, "gaze_off", gaze_off, getattr(config, 'TIME_GAZING', 2.5), current_time):
+            if abs(iris_x) > abs(iris_y):
+                direction = "left" if iris_x < 0 else "right"
+            else:
+                direction = "up" if iris_y < 0 else "down"
+            active_alerts.append(f"Looking away ({direction})")
+            penalty_increment += 15
 
         # Rule 1c - Head turned away (Yaw and Pitch)
         yaw_flag = abs(yaw_angle) > config.YAW_THRESHOLD_DEG

@@ -8,13 +8,13 @@ from ultralytics import YOLO
 
 import config_vision as config
 
-# Initialize the heavier YOLOv8m model once, globally.
+# Initialize the YOLOv11m model once, globally — single source of truth.
 try:
-    _global_yolo_model = YOLO(getattr(config, "YOLO_MODEL_PATH", getattr(config, "YOLO_MODEL_NAME", "models/yolov8m.pt")))
+    _global_yolo_model = YOLO(getattr(config, "YOLO_MODEL_PATH", getattr(config, "YOLO_MODEL_NAME", "models/yolov11m.pt")))
 except Exception as e:
     raise RuntimeError(
-        f"Failed to load YOLO model at {getattr(config, 'YOLO_MODEL_PATH', getattr(config, 'YOLO_MODEL_NAME', 'models/yolov8m.pt'))}. "
-        "Download yolov8m.pt into the models/ folder."
+        f"Failed to load YOLO model at {getattr(config, 'YOLO_MODEL_PATH', getattr(config, 'YOLO_MODEL_NAME', 'models/yolov11m.pt'))}. "
+        "Download yolov11m.pt into the models/ folder (or let Ultralytics auto-download)."
     ) from e
 
 # Warm up once to avoid first-inference stall during exam start.
@@ -28,7 +28,7 @@ _yolo_lock = threading.Lock()
 
 class PersonDetector:
     """
-    Runs YOLOv8m for people + prohibited object detection and applies a cascade
+    Runs YOLOv11m for people + prohibited object detection and applies a cascade
     of post-filters (confidence, area, texture, edges, temporal persistence).
     """
 
@@ -195,7 +195,7 @@ class PersonDetector:
     # --- Public API -------------------------------------------------------
     def process_frame(self, frame, face_bbox=None, student_id=None):
         """
-        Runs YOLOv8m and post-filters. Includes temporal persistence (>=3 consecutive frames).
+        Runs YOLOv11m and post-filters. Includes temporal persistence (>=3 consecutive frames).
         """
         sid = str(student_id) if student_id is not None else "__default__"
         state = self._state(sid)

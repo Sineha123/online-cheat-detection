@@ -717,7 +717,7 @@ class AdminMonitor:
         try:
             # Import here to avoid circular dependency
             from app import (
-                camera_streamer, detect_faces, detect_objects, object_net_enabled,
+                camera_streamer, detect_faces,
                 detect_people_opencv, get_latest_student_frame, active_exam_students, active_exam_students_lock,
                 _persist_behavior_violation
             )
@@ -915,14 +915,14 @@ def setup_admin_socketio(socketio, admin_monitor):
 
 # Module Initialization
 print("=" * 70)
-print("✅ Admin Monitoring Module Loaded — YOLOv4-tiny Object Detection")
+print("✅ Admin Monitoring Module Loaded — YOLOv11 Object Detection")
 print(f"  - OpenCV:    {'✅ Available' if CV2_AVAILABLE else '❌ Not available'}")
 print(f"  - MediaPipe: {'✅ Available' if MEDIAPIPE_AVAILABLE else '❌ Not available'}")
 print(f"  - Audio:     {'✅ Available' if AUDIO_AVAILABLE else '❌ Not available'}")
 print("  - Active Features:")
 print("    ✓ Real-time Face Detection (Haar Cascade)")
 print("    ✓ Eye Gaze Tracking (MediaPipe)")
-print("    ✓ Object Detection — YOLOv4-tiny (cell phone, book, laptop)")
+print("    ✓ Object Detection — YOLOv11 (cell phone, book, laptop)")
 print("    ✓ Instant warning on prohibited object detection")
 print("    ✓ Auto-terminate after 3 warnings")
 print("    ✓ Audio Monitoring")

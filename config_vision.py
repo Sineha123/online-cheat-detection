@@ -8,15 +8,15 @@ TARGET_FPS = 30
 # Feature Toggles
 # Set these to False to temporarily disable heavy subsystems without code removal.
 ENABLE_OBJECT_DETECTION = True   # keep object/person boxes active
-ENABLE_GAZE = False
+ENABLE_GAZE = True               # iris + head-pose gaze tracking enabled
 ENABLE_WARNINGS = True   # keep warning pipeline active
 ENABLE_CAMERA_OBSTRUCTION = False  # keep blur/covered warnings off
 DISABLE_FACE_WARNINGS = False
 DISABLE_VOICE_WARNINGS = False
 
 # YOLO Settings
-# Switch to the stronger YOLOv8m checkpoint for better small-object accuracy.
-YOLO_MODEL_PATH = os.path.join("models", "yolov8m.pt")
+# YOLOv11m — single source of truth for all object/person detection.
+YOLO_MODEL_PATH = os.path.join("models", "yolov11m.pt")
 # Backward compatibility for legacy imports
 YOLO_MODEL_NAME = YOLO_MODEL_PATH
 # Run object detector every N frames to balance CPU and latency. (1 = every frame)
@@ -118,9 +118,9 @@ INSTANT_PENALTY_THRESHOLD = 3 # If >= 3 rules broken simultaneously, bypass cool
 
 # Temporal Debouncing (Seconds a condition must be held before triggering a warning)
 TIME_NO_FACE = 1.0  # faster no-face trigger (face warnings will be muted separately)
-TIME_HEAD_TURNED = 4.5  # Set to looser than gaze
+TIME_HEAD_TURNED = 2.5  # 2.5s sustained head-turn before warning
 TIME_EYES_CLOSED = 1.0
-TIME_GAZING = 3.5       # User requested 3-4s for staring away
+TIME_GAZING = 2.5       # 2.5s looking away triggers warning
 TIME_MULTIPLE_PERSONS = 0.4  # slight debounce to avoid one-frame spikes
 TIME_BANNED_OBJECT = 0.5             # legacy time-based path (kept for compatibility)
 # Frame-based debounce for banned objects (handled in detector; keep lightweight here)
