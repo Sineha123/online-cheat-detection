@@ -662,6 +662,30 @@ if ULTRALYTICS_AVAILABLE:
         object_net_enabled = False
         object_net = None
         logger.error(f"Error loading YOLOv8 model: {e}", exc_info=True)
+
+# Optional GroundingDINO secondary detector (text-guided for small/rare objects)
+GROUNDING_ENABLED = False
+grounding_model = None
+GROUNDING_PROMPT = os.getenv('GROUNDING_DINO_PROMPT', (
+    "smartphone, mobile phone, tablet, book, paper, document, pen, "
+    "usb drive, cable wire, earphones, wired earphones, headphones, "
+    "earbuds, handsfree, camera"
+))
+GROUNDING_CONF_THRESHOLD = float(os.getenv('GROUNDING_DINO_CONF', '0.60'))
+try:
+    if os.getenv('GROUNDING_DINO_ENABLED', '0') == '1':
+        from groundingdino.util.inference import Model as GroundingModel
+        gd_config = os.getenv('GROUNDING_DINO_CONFIG', '').strip()
+        gd_ckpt = os.getenv('GROUNDING_DINO_CHECKPOINT', '').strip()
+        if gd_config and gd_ckpt and os.path.exists(gd_config) and os.path.exists(gd_ckpt):
+            device = 'cuda:0' if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available() else 'cpu'
+            grounding_model = GroundingModel(model_config_path=gd_config, model_checkpoint_path=gd_ckpt, device=device)
+            GROUNDING_ENABLED = True
+            logger.info(f"GroundingDINO loaded on {device} (config={gd_config})")
+        else:
+            logger.warning("GroundingDINO not enabled: set GROUNDING_DINO_ENABLED=1 and provide GROUNDING_DINO_CONFIG / GROUNDING_DINO_CHECKPOINT")
+except Exception as e:
+    logger.warning(f"GroundingDINO unavailable: {e}")
 # Import monitoring modules
 try:
     from admin_live_monitoring import AdminMonitor, setup_admin_socketio, CameraSimulator
@@ -708,6 +732,23 @@ runtime_warning_state = {}
 runtime_warning_state_lock = threading.Lock()
 # Initialized early so background helpers can safely reference these before monitor setup.
 warning_system = None
+
+# Gaze configuration (temporal smoothing + timers)
+GAZE_HORIZ_THRESH = float(os.getenv('GAZE_HORIZ_THRESH', '0.25'))
+GAZE_VERT_THRESH = float(os.getenv('GAZE_VERT_THRESH', '0.35'))
+HEAD_YAW_LIMIT = float(os.getenv('HEAD_YAW_LIMIT', '30.0'))
+HEAD_PITCH_UP_LIMIT = float(os.getenv('HEAD_PITCH_UP_LIMIT', '20.0'))
+HEAD_PITCH_DOWN_LIMIT = float(os.getenv('HEAD_PITCH_DOWN_LIMIT', '-20.0'))
+GAZE_TIME_THRESHOLD = float(os.getenv('GAZE_TIME_THRESHOLD', '3.0'))
+GAZE_SMOOTH_FRAMES = int(os.getenv('GAZE_SMOOTH_FRAMES', '5'))
+GAZE_PROCESS_EVERY_N = int(os.getenv('GAZE_PROCESS_EVERY_N', '2'))
+GAZE_DEBUG = (os.getenv('GAZE_DEBUG', '0') == '1')
+OBJECT_DEBUG = (os.getenv('OBJECT_DEBUG', '0') == '1')
+SCORE_DEBUG = (os.getenv('SCORE_DEBUG', '0') == '1')
+PERF_DEBUG = (os.getenv('PERF_DEBUG', '0') == '1')
+FRAME_DUMP = (os.getenv('FRAME_DUMP', '0') == '1')
+FRAME_DUMP_EVERY = int(os.getenv('FRAME_DUMP_EVERY', '10'))
+DEBUG_PATH = os.getenv('DEBUG_PATH', 'debug')
 
 # Thresholds for Eye Tracking
 EAR_THRESHOLD = 0.23                          # Lower = less sensitive to normal blinks, only detects sustained close
@@ -891,10 +932,7 @@ def _detect_gaze_direction_from_mesh(landmarks, w, h):
         if avg_x_ratio > (1.0 - left_right_threshold):
             return "RIGHT"
 
-    if avg_y_ratio < up_threshold:
-        return "UP"
-    if avg_y_ratio > down_threshold:
-        return "DOWN"
+    # Up/down gaze disabled per request; treat vertical offsets as centered.
     return "CENTER"
 
 def _pose_point_px(landmarks, idx, w, h, min_vis=0.45):
@@ -1166,6 +1204,14 @@ def _trigger_violation(student_id, student_name, violation_type, details, cooldo
     now = time.time()
     vtype = str(violation_type or '').strip().upper()
 
+    # User request: ignore gaze-up and (optionally) voice warnings.
+    if vtype == 'GAZE_UP':
+        logger.info(f"[TRIGGER IGNORED] sid={sid} type={vtype} (gaze up disabled)")
+        return False
+    if vtype in ('VOICE_DETECTED', 'MIC_OFF') and getattr(config, "DISABLE_VOICE_WARNINGS", False):
+        logger.info(f"[TRIGGER IGNORED] sid={sid} type={vtype} (voice warnings disabled)")
+        return False
+
     # Ensure warning system is always available even if monitoring init failed
     global warning_system, admin_monitor, tab_detector
     if warning_system is None:
@@ -1188,6 +1234,11 @@ def _trigger_violation(student_id, student_name, violation_type, details, cooldo
                 'no_face_start': None,
                 'multiple_faces_start': None,
                 'object_consecutive': {},
+                'gaze_buffer': [],
+                'gaze_state': 'CENTER',
+                'gaze_started_at': 0.0,
+                'gaze_last_tick': 0,
+                'frame_seq': 0,
                 'detection_states': [],
                 'baseline_pose': None,
                 'pose_prev_gray': None,
@@ -1310,6 +1361,8 @@ def _persist_object_violation(student_id, student_name, label, confidence):
 
     # Require consecutive hits to reduce single-frame false positives (books/papers)
     consecutive_needed = max(int(os.getenv('OBJECT_CONSEC_FRAMES', OBJECT_CONSEC_FRAMES)), 2)
+    if norm_label == 'book':
+        consecutive_needed = max(consecutive_needed, 10)
     now = time.time()
     with student_detection_state_lock:
         state = student_detection_state.setdefault(sid, {})
@@ -1494,6 +1547,88 @@ def _detect_phone_like_contours(frame):
     except Exception:
         return []
 
+def _detect_with_grounding_dino(frame):
+    """Optional GroundingDINO text-guided detector (rare/small objects)."""
+    if not (GROUNDING_ENABLED and grounding_model and CV2_AVAILABLE and frame is not None):
+        return []
+    try:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        classes = [c.strip() for c in str(GROUNDING_PROMPT).split(',') if c.strip()]
+        if not classes:
+            return []
+        result = grounding_model.predict_with_classes(
+            image=rgb,
+            classes=classes,
+            box_threshold=float(GROUNDING_CONF_THRESHOLD),
+            text_threshold=0.25
+        )
+        boxes = getattr(result, "boxes", None) or getattr(result, "pred_boxes", None)
+        labels = getattr(result, "labels", None) or getattr(result, "pred_logits", None) or getattr(result, "classes", None)
+        scores = getattr(result, "scores", None) or getattr(result, "pred_scores", None)
+        if boxes is None or labels is None:
+            return []
+        h, w = frame.shape[:2]
+        out = []
+        for idx, box in enumerate(boxes):
+            try:
+                lbl_raw = labels[idx]
+                if hasattr(lbl_raw, "cpu"):
+                    lbl_raw = lbl_raw.cpu()
+                lbl = _normalize_label(str(lbl_raw))
+            except Exception:
+                lbl = "object"
+            if not _label_is_prohibited(lbl):
+                continue
+            try:
+                sc = float(scores[idx]) if scores is not None else float(GROUNDING_CONF_THRESHOLD)
+            except Exception:
+                sc = float(GROUNDING_CONF_THRESHOLD)
+            if sc < GROUNDING_CONF_THRESHOLD:
+                continue
+            xyxy = box
+            if hasattr(xyxy, "cpu"):
+                xyxy = xyxy.cpu()
+            if hasattr(xyxy, "tolist"):
+                xyxy = xyxy.tolist()
+            if len(xyxy) < 4:
+                continue
+            x1, y1, x2, y2 = xyxy[:4]
+            x1 = max(0, min(int(x1), w - 1))
+            y1 = max(0, min(int(y1), h - 1))
+            x2 = max(0, min(int(x2), w))
+            y2 = max(0, min(int(y2), h))
+            bw = max(1, x2 - x1)
+            bh = max(1, y2 - y1)
+            out.append({
+                'label': lbl,
+                'confidence': sc,
+                'x': x1,
+                'y': y1,
+                'w': bw,
+                'h': bh,
+                'is_prohibited': True
+            })
+        return out
+    except Exception as e:
+        logger.warning(f"GroundingDINO inference failed: {e}")
+        return []
+
+def _bbox_iou(a, b):
+    try:
+        ax1, ay1, aw, ah = a['x'], a['y'], a['w'], a['h']
+        bx1, by1, bw, bh = b['x'], b['y'], b['w'], b['h']
+        ax2, ay2 = ax1 + aw, ay1 + ah
+        bx2, by2 = bx1 + bw, by1 + bh
+        inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+        inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+        inter = inter_w * inter_h
+        if inter == 0:
+            return 0.0
+        union = aw * ah + bw * bh - inter
+        return inter / max(union, 1.0)
+    except Exception:
+        return 0.0
+
 # Object detection tuning (can be overridden via env vars)
 #  - confidence: lower to 0.50 so real devices fire, but still filtered by texture/area
 #  - area: ignore tiny specks (<1% of frame) and huge flat walls (>25%).
@@ -1503,6 +1638,11 @@ OBJECT_MAX_AREA_RATIO = float(os.getenv('OBJECT_MAX_AREA_RATIO', '0.20'))    # <
 # Reject flat, texture-less regions (walls/blank paper) by Laplacian variance and edge density.
 OBJECT_MIN_TEXTURE_VAR = float(os.getenv('OBJECT_MIN_TEXTURE_VAR', '120.0'))
 OBJECT_MIN_EDGE_DENSITY = float(os.getenv('OBJECT_MIN_EDGE_DENSITY', '0.015'))  # >=1.5% edge pixels
+# Absolute pixel/region guards to suppress wall/ceiling hits
+OBJECT_MIN_PIXELS = int(os.getenv('OBJECT_MIN_PIXELS', '4000'))               # bbox area must exceed this
+OBJECT_TOP_IGNORE_RATIO = float(os.getenv('OBJECT_TOP_IGNORE_RATIO', '0.12')) # ignore detections centered above this % of frame height
+# Require longer persistence for objects (frames)
+OBJECT_CONSEC_FRAMES = int(os.getenv('OBJECT_CONSEC_FRAMES', '8'))
 
 def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
     """
@@ -1517,8 +1657,9 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
         h, w = frame.shape[:2]
 
         def _predict(source_frame, threshold):
+            t0 = time.time()
             with yolo_infer_lock:
-                return object_net.predict(
+                res = object_net.predict(
                     source=source_frame,
                     conf=float(threshold),
                     imgsz=int(YOLO_IMG_SIZE),
@@ -1527,6 +1668,9 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                     verbose=False,
                     max_det=12
                 )
+            if PERF_DEBUG:
+                logger.info(f"[perf-obj] infer={(time.time()-t0):.3f}s")
+            return res
 
         if object_net_enabled and object_net is not None:
             target_classes = list(set(prohibited_class_ids + [0])) if prohibited_class_ids else [0]
@@ -1582,6 +1726,16 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                             min_area = 0.005   # allow smaller phones
                             min_edge = 0.003   # phones can be flat/shiny
                             tex_min = 40.0
+                        elif label == 'book':
+                            # Stricter to avoid flat walls/whiteboards being tagged as "book"/"paper"
+                            min_conf = max(min_conf, 0.65)
+                            min_area = max(min_area, 0.022)
+                            max_area = min(max_area, 0.15)
+                            min_edge = max(min_edge, 0.060)
+                            tex_min = max(tex_min, 220.0)
+                            aspect = float(bw) / float(max(1, bh))
+                            if aspect < 0.55 or aspect > 1.80:
+                                continue
 
                         area_ratio = float(bw * bh) / float(max(1, w * h))
 
@@ -1602,8 +1756,22 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                                 edge_thresh = min_edge
                                 tex_thresh = tex_min
                                 if label == 'book':
-                                    edge_thresh = max(edge_thresh, 0.025)
-                                    tex_thresh = max(tex_thresh, 120.0)
+                                    edge_thresh = max(edge_thresh, 0.060)
+                                    tex_thresh = max(tex_thresh, 220.0)
+                                    mean_val = float(np.mean(gray_roi))
+                                    std_val = float(np.std(gray_roi))
+                                    # Reject nearly uniform or very bright patches (walls/whiteboards)
+                                    if mean_val > 195.0 and std_val < 26.0:
+                                        continue
+                                    # Reject very dark low-entropy regions (headboards, shadows)
+                                    if mean_val < 60.0 and std_val < 28.0:
+                                        continue
+                                    # Simple entropy check to avoid flat textures
+                                    hist = cv2.calcHist([gray_roi],[0],None,[32],[0,256])
+                                    hist = hist / (gray_roi.size or 1)
+                                    entropy = -np.sum(hist * (np.log(hist + 1e-9)))
+                                    if entropy < 3.2:
+                                        continue
                                 if tex_var < tex_thresh or edge_density < edge_thresh:
                                     continue
                         except Exception:
@@ -1619,6 +1787,13 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                             'is_prohibited': _label_is_prohibited(label)
                         })
 
+        # Secondary detector (GroundingDINO) for small/rare items
+        gd_dets = _detect_with_grounding_dino(frame)
+        if gd_dets:
+            for gd in gd_dets:
+                if not any(_bbox_iou(gd, d) > 0.5 and _normalize_label(gd['label']) == _normalize_label(d['label']) for d in detections):
+                    detections.append(gd)
+
         if OCR_OBJECT_FALLBACK_ENABLED:
             ocr_hits = _detect_prohibited_text(frame)
             if ocr_hits:
@@ -1633,12 +1808,108 @@ def detect_objects(frame, conf_threshold=0.20, include_visual_classes=False):
                 continue
             normalized_detection = dict(detection)
             normalized_detection['label'] = label
+            # Absolute pixel-area guard
+            if normalized_detection['w'] * normalized_detection['h'] < OBJECT_MIN_PIXELS:
+                continue
+            # Ignore detections near the top edge (walls/ceiling)
+            cy = normalized_detection['y'] + normalized_detection['h'] * 0.5
+            if h > 0 and cy < h * OBJECT_TOP_IGNORE_RATIO:
+                continue
             filtered.append(normalized_detection)
+            if OBJECT_DEBUG:
+                logger.info(f"[obj] label={label} conf={normalized_detection.get('confidence',0):.2f} box=({normalized_detection['x']},{normalized_detection['y']},{normalized_detection['w']},{normalized_detection['h']})")
         return filtered
     except Exception as e:
         logger.error(f"Error in YOLOv8 object detection: {e}", exc_info=True)
         return []
 
+def _majority_vote(items):
+    if not items:
+        return None
+    from collections import Counter
+    return Counter(items).most_common(1)[0][0]
+
+def _classify_gaze(iris_offset, yaw, pitch, ear, face_detected):
+    """
+    Combines eye offsets with head pose. Vertical gaze (up/down) is disabled for now.
+    Returns one of: CENTER, LEFT, RIGHT, AWAY.
+    """
+    if not face_detected:
+        return "AWAY"
+    if ear < EAR_THRESHOLD:  # eyes closed/blink -> ignore
+        return "CENTER"
+
+    try:
+        horiz, vert = float(iris_offset[0]), float(iris_offset[1])
+    except Exception:
+        horiz, vert = 0.0, 0.0
+
+    # Head pose gates (yaw only; vertical gaze suppressed)
+    if abs(yaw) > HEAD_YAW_LIMIT:
+        return "AWAY"
+
+    # Iris-based gaze (horizontal only)
+    if horiz < -GAZE_HORIZ_THRESH:
+        return "LEFT"
+    if horiz > GAZE_HORIZ_THRESH:
+        return "RIGHT"
+    return "CENTER"
+
+def _update_gaze_state(student_id, student_name, iris_offset, yaw, pitch, ear, face_detected, frame_seq):
+    """
+    Temporal smoothing + 3s timer before emitting distraction warnings.
+    """
+    sid = str(student_id)
+    with student_detection_state_lock:
+        st = student_detection_state.setdefault(sid, {})
+        st.setdefault('gaze_buffer', [])
+        st.setdefault('gaze_state', 'CENTER')
+        st.setdefault('gaze_started_at', 0.0)
+        st.setdefault('gaze_last_tick', 0)
+        st['frame_seq'] = int(st.get('frame_seq', 0)) + 1
+        frame_seq = st['frame_seq']
+
+    if frame_seq % max(GAZE_PROCESS_EVERY_N, 1) != 0:
+        return
+
+    direction = _classify_gaze(iris_offset, yaw, pitch, ear, face_detected)
+
+    with student_detection_state_lock:
+        buf = st['gaze_buffer']
+        buf.append(direction)
+        if len(buf) > max(GAZE_SMOOTH_FRAMES, 1):
+            buf.pop(0)
+        smooth = _majority_vote([d for d in buf if d is not None])
+        if smooth is None:
+            smooth = "CENTER"
+
+        if smooth == "CENTER":
+            st['gaze_state'] = "CENTER"
+            st['gaze_started_at'] = 0.0
+            return
+
+        if smooth not in ("LEFT", "RIGHT", "DOWN", "AWAY"):
+            # Ignore UP/others
+            st['gaze_state'] = "CENTER"
+            st['gaze_started_at'] = 0.0
+            return
+
+        now = time.time()
+        if st['gaze_state'] != smooth:
+            st['gaze_state'] = smooth
+            st['gaze_started_at'] = now
+            return
+
+        started = st.get('gaze_started_at', 0.0) or now
+        elapsed = now - started
+        if elapsed >= GAZE_TIME_THRESHOLD:
+            st['gaze_started_at'] = now  # reset to allow future warnings after interval
+
+    # Emit warning outside lock
+    label = "away from screen" if smooth == "AWAY" else f"{smooth.lower()}"
+    if GAZE_DEBUG:
+        logger.info(f"[gaze] sid={sid} dir={smooth} yaw={yaw:.1f} pitch={pitch:.1f} iris=({horiz:.3f},{vert:.3f}) buf={buf} elapsed={elapsed:.2f}")
+    _persist_behavior_violation(sid, student_name, "DISTRACTION", f"Gaze off screen ({label})")
 def _persist_behavior_violation(student_id, student_name, violation_type, details):
     sid = str(student_id)
     ok = _trigger_violation(
@@ -1735,31 +2006,42 @@ def _run_student_frame_detection(student_id, student_name, frame):
     try:
         logger.debug(f"[student_frame] new vision engine sid={sid}")
         processed = frame.copy()
-        
+
+        t0 = time.time()
         face_analyzer, person_detector, decision_engine, UILayer = _get_vision_engines()
         import config_vision as config
-        
+
         # Convert to RGB for MediaPipe
         frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-        
+
         # --- CAMERA OBSTRUCTION DETECTION ---
-        # 0a. Check for intentional blur (hand held in front, fogged lens)
-        try:
-            _gray_obs = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-            _lap_var = cv2.Laplacian(_gray_obs, cv2.CV_64F).var()
-            _mean_bright = float(_gray_obs.mean())
-            # If image is extremely blurry (var < 10) AND not just a dark room
-            if _lap_var < 10.0 and _mean_bright > 20.0:
-                _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears intentionally blurred or obstructed")
-            # If image is almost completely dark (cam covered) for >2s, fire immediately
-            if _mean_bright < 12.0:
-                _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears covered or blocked")
-        except Exception:
-            pass
+        if getattr(config, "ENABLE_CAMERA_OBSTRUCTION", True):
+            try:
+                _gray_obs = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                _lap_var = cv2.Laplacian(_gray_obs, cv2.CV_64F).var()
+                _mean_bright = float(_gray_obs.mean())
+                # If image is extremely blurry (var < 10) AND not just a dark room
+                if _lap_var < 10.0 and _mean_bright > 20.0:
+                    _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears intentionally blurred or obstructed")
+                # If image is almost completely dark (cam covered) for >2s, fire immediately
+                if _mean_bright < 12.0:
+                    _persist_behavior_violation(sid, student_name, "NO_FACE", "Camera appears covered or blocked")
+            except Exception:
+                pass
         # --- END CAMERA OBSTRUCTION DETECTION ---
         
         # 1. Face Analysis
+        t_face0 = time.time()
         face_detected, yaw_angle, pitch_angle, ear, iris_offset, landmarks = face_analyzer.process_frame(frame_rgb)
+        t_face = time.time() - t_face0
+
+        if getattr(config, "ENABLE_GAZE", True):
+            _update_gaze_state(sid, student_name, iris_offset, yaw_angle, pitch_angle, ear, face_detected, 0)
+        else:
+            # zero-out gaze signals when disabled
+            yaw_angle = 0.0
+            pitch_angle = 0.0
+            iris_offset = (0.0, 0.0)
 
         face_bbox = None
         if landmarks:
@@ -1772,7 +2054,13 @@ def _run_student_frame_detection(student_id, student_name, frame):
             face_bbox = (int(x1), int(y1), int(x2), int(y2))
         
         # 2. Person & Object Detection
-        person_count, bboxes, banned_objects = person_detector.process_frame(processed, face_bbox)
+        t_obj0 = time.time()
+        if getattr(config, "ENABLE_OBJECT_DETECTION", True):
+            person_count, bboxes, banned_objects = person_detector.process_frame(processed, face_bbox, sid)
+            t_obj = time.time() - t_obj0
+        else:
+            person_count, bboxes, banned_objects = ((1 if face_detected else 0), [], [])
+            t_obj = time.time() - t_obj0
 
         # Reclassify / filter banned objects using face overlap to reduce false phones-near-ear
         def bbox_iou(b1, b2):
@@ -1784,7 +2072,7 @@ def _run_student_frame_detection(student_id, student_name, frame):
             area2 = max(0, b2[2]-b2[0]) * max(0, b2[3]-b2[1])
             return inter / max(area1 + area2 - inter, 1)
 
-        if face_bbox:
+        if face_bbox and getattr(config, "ENABLE_OBJECT_DETECTION", True):
             filtered = []
             frame_h = processed.shape[0] if processed is not None else 0
             for obj in banned_objects:
@@ -1838,7 +2126,7 @@ def _run_student_frame_detection(student_id, student_name, frame):
 
                 if _check_ear_roi(l_x1, y1, l_x2, y2) or _check_ear_roi(r_x1, y1, r_x2, y2):
                     banned_objects.append({
-                        "label": "Headphones/Earbuds",
+                        "label": "headphones",
                         "bbox": (l_x1, y1, r_x2, y2, 0.85)
                     })
             except Exception as e:
@@ -1846,26 +2134,37 @@ def _run_student_frame_detection(student_id, student_name, frame):
             # --- END EARBUD HEURISTIC ---
         
         # 3. Evaluate Rule Violations
-        warnings, penalty_score = decision_engine.evaluate(
-            sid, face_detected, person_count, yaw_angle, pitch_angle, ear, iris_offset, banned_objects
-        )
+        if getattr(config, "ENABLE_WARNINGS", True):
+            warnings, penalty_score = decision_engine.evaluate(
+                sid, face_detected, person_count, yaw_angle, pitch_angle, ear, iris_offset, banned_objects
+            )
+        else:
+            warnings, penalty_score = ([], 0)
         
         # 4. Integrate detections with warning persistence
+        disable_face_warn = getattr(config, "DISABLE_FACE_WARNINGS", False)
         for w in warnings:
             if "Face not detected" in w:
-                _persist_behavior_violation(sid, student_name, "NO_FACE", "No face detected in camera viewport")
+                if not disable_face_warn:
+                    _persist_behavior_violation(sid, student_name, "NO_FACE", "No face detected in camera viewport")
             elif "Multiple persons" in w:
-                _persist_behavior_violation(sid, student_name, "MULTIPLE_FACES", w)
+                if not disable_face_warn:
+                    _persist_behavior_violation(sid, student_name, "MULTIPLE_FACES", w)
             elif "Gaze off screen" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
+                if not disable_face_warn:
+                    _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
             elif "Head turned away" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
+                if not disable_face_warn:
+                    _persist_behavior_violation(sid, student_name, "DISTRACTION", w)
             elif "Head turned" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", "Please look at the screen (Head turned)")
+                if not disable_face_warn:
+                    _persist_behavior_violation(sid, student_name, "DISTRACTION", "Please look at the screen (Head turned)")
             elif "Eyes not visible" in w:
-                _persist_behavior_violation(sid, student_name, "EYES_CLOSED", "Eyes not visible / Looking down")
+                if not disable_face_warn:
+                    _persist_behavior_violation(sid, student_name, "EYES_CLOSED", "Eyes not visible / Looking down")
             elif "Gazing" in w:
-                _persist_behavior_violation(sid, student_name, "DISTRACTION", "Gazing at another screen/paper")
+                if not disable_face_warn:
+                    _persist_behavior_violation(sid, student_name, "DISTRACTION", "Gazing at another screen/paper")
 
         for obj in banned_objects:
             bbox = obj.get('bbox') or (0, 0, 0, 0, 0.0)
@@ -1873,7 +2172,7 @@ def _run_student_frame_detection(student_id, student_name, frame):
             _persist_object_violation(sid, student_name, obj.get('label', 'Object'), confidence)
 
         # Hard-guard: trigger violation immediately when multiple humans detected
-        if int(person_count) > 1:
+        if int(person_count) > 1 and not disable_face_warn:
             _persist_behavior_violation(
                 sid,
                 student_name,
@@ -1886,6 +2185,14 @@ def _run_student_frame_detection(student_id, student_name, frame):
         
         # 6. Push to MJPEG live stream format
         encoded = _encode_frame_to_base64(processed)
+
+        if FRAME_DUMP and (student_detection_state[sid]['frame_seq'] % max(FRAME_DUMP_EVERY,1) == 0):
+            try:
+                dump_dir = os.path.join(DEBUG_PATH, f"{sid}")
+                os.makedirs(dump_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(dump_dir, f"{int(time.time()*1000)}.jpg"), processed)
+            except Exception as e:
+                logger.debug(f"[frame_dump] sid={sid} err={e}")
         
         # Format the diagnostics snapshot for the legacy Admin UI
         latest_snapshot = {
@@ -1900,7 +2207,6 @@ def _run_student_frame_detection(student_id, student_name, frame):
             'gaze_direction': (
                 "LEFT" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 0 and abs(iris_offset[0]) > config.IRIS_OFFSET_THRESHOLD and iris_offset[0] < 0
                 else "RIGHT" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 0 and abs(iris_offset[0]) > config.IRIS_OFFSET_THRESHOLD and iris_offset[0] > 0
-                else "UP" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 1 and abs(iris_offset[1]) > getattr(config, 'IRIS_OFFSET_THRESHOLD_Y', 0.20) and iris_offset[1] < 0
                 else "DOWN" if isinstance(iris_offset, (list, tuple)) and len(iris_offset) > 1 and abs(iris_offset[1]) > getattr(config, 'IRIS_OFFSET_THRESHOLD_Y', 0.20) and iris_offset[1] > 0
                 else "CENTER"
             ),
@@ -1924,7 +2230,9 @@ def _run_student_frame_detection(student_id, student_name, frame):
             item['last_prohibited_object_labels'] = [b['label'] for b in banned_objects]
             item['last_person_count'] = int(person_count)
             latest_student_frames[sid] = item
-            
+
+        if PERF_DEBUG:
+            logger.info(f"[perf-frame] sid={sid} face={t_face:.3f}s obj={t_obj:.3f}s total={(time.time()-t0):.3f}s")
     except Exception as e:
         logger.error(f"Student frame worker failed for {sid}: {e}", exc_info=True)
     finally:
@@ -1964,6 +2272,11 @@ def _schedule_student_frame_detection(student_id, student_name, frame):
                 'no_face_start': None,
                 'multiple_faces_start': None,
                 'object_consecutive': {},
+                'gaze_buffer': [],
+                'gaze_state': 'CENTER',
+                'gaze_started_at': 0.0,
+                'gaze_last_tick': 0,
+                'frame_seq': 0,
                 'detection_states': [],
                 'baseline_pose': None,
                 'pose_prev_gray': None,
@@ -2476,21 +2789,8 @@ def rules():
 @app.route('/faceInput')
 @require_role('STUDENT')
 def faceInput():
-    # Release any server-held webcam so browser capture can open camera reliably.
-    try:
-        camera_streamer.release()
-    except Exception:
-        pass
-    user = current_user()
-    if user and admin_monitor:
-        try:
-            admin_monitor.stop_monitoring(int(user['Id']))
-        except Exception:
-            pass
-    with active_exam_students_lock:
-        if user:
-            active_exam_students.discard(int(user['Id']))
-    return render_template('ExamFaceInput.html')
+    # Face capture step removed; go straight to system check.
+    return redirect(url_for('systemCheck'))
 
 @app.route('/video_capture')
 def video_capture():
@@ -2560,8 +2860,7 @@ def saveFaceInput():
     except Exception as e:
         logger.error(f"saveFaceInput error: {e}")
         flash(f'Failed to process or save image: {e}', 'error')
-        # Error hone par wapis face input page par bhej dein
-        return redirect(url_for('faceInput'))
+        return redirect(url_for('systemCheck'))
 
 @app.route('/confirmFaceInput')
 def confirmFaceInput():
@@ -2822,11 +3121,34 @@ def examAction():
     time_spent = data.get('time_spent', 0)
     auto_terminated = data.get('auto_terminated', False)
 
+    def _norm(ans):
+        try:
+            return str(ans).strip().lower()
+        except Exception:
+            return ""
+
     questions_payload = data.get('questions') if isinstance(data.get('questions'), list) else None
+    answers_payload = data.get('answers') if isinstance(data.get('answers'), dict) else {}
     if questions_payload is not None and len(questions_payload) > 0:
+        score = 0.0
+        total_marks = 0.0
+        correct_answers = 0
+        for q in questions_payload:
+            qid = q.get('id') or q.get('question_id') or q.get('QuestionID')
+            marks = float(q.get('marks') or q.get('mark') or q.get('points') or 1)
+            total_marks += marks
+            correct = _norm(q.get('correct') or q.get('correct_answer') or q.get('answer'))
+            student_ans = q.get('student_answer') or q.get('selected_option') or None
+            if student_ans is None and qid is not None and qid in answers_payload:
+                student_ans = answers_payload.get(qid)
+            student_norm = _norm(student_ans)
+            if student_norm and student_norm == correct:
+                score += marks
+                correct_answers += 1
+            if SCORE_DEBUG:
+                logger.info(f"[score] qid={qid} student='{student_norm}' correct='{correct}' marks={marks} match={student_norm==correct}")
         total_questions = len(questions_payload)
-        correct_answers = sum(1 for q in questions_payload if bool(q.get('is_correct')))
-        score = correct_answers * 2
+        max_score = total_marks if total_marks > 0 else total_questions
     else:
         tq = data.get('total_questions')
         if tq is None:
@@ -2851,13 +3173,14 @@ def examAction():
         correct_answers = int(round(score / 2.0))
 
     # Calculate percentage
-    max_score = total_questions * 2
-    percentage = round((correct_answers / total_questions) * 100, 2) if total_questions > 0 else 0
+    if max_score <= 0:
+        max_score = total_questions * 2
+    percentage = round((score / max_score) * 100, 2) if max_score > 0 else 0
     
     # Determine DB status (must match ENUM: 'PASS','FAIL','TERMINATED')
     if auto_terminated:
-        db_status = 'TERMINATED'
-    elif percentage >= 50:
+        db_status = 'FAILED - CHEATING DETECTED'
+    elif percentage >= float(os.getenv('PASS_PERCENTAGE', '50')):
         db_status = 'PASS'
     else:
         db_status = 'FAIL'
@@ -2877,7 +3200,6 @@ def examAction():
         'eyes_closed': 'EYES_CLOSED', 'EYES_CLOSED': 'EYES_CLOSED',
         'gaze_left': 'GAZE_LEFT', 'GAZE_LEFT': 'GAZE_LEFT',
         'gaze_right': 'GAZE_RIGHT', 'GAZE_RIGHT': 'GAZE_RIGHT',
-        'gaze_up': 'GAZE_UP', 'GAZE_UP': 'GAZE_UP',
         'gaze_down': 'GAZE_DOWN', 'GAZE_DOWN': 'GAZE_DOWN',
         'voice_detected': 'VOICE_DETECTED', 'VOICE_DETECTED': 'VOICE_DETECTED',
         'DISTRACTION': 'DISTRACTION', 'distraction': 'DISTRACTION',
@@ -4014,20 +4336,25 @@ def api_all_student_warnings():
     if warning_system:
         with warning_system.lock:
             for sid, count in warning_system.warnings.items():
+                capped = min(int(count or 0), int(getattr(warning_system, 'max_warnings', 3)))
                 result[str(sid)] = {
-                    'warnings': count,
+                    'warnings': capped,
                     'name': warning_system.student_names.get(sid, 'Unknown'),
-                    'violations': warning_system.violations.get(sid, [])
+                    'violations': (warning_system.violations.get(sid, []) or [])[-3:]
                 }
     with runtime_warning_state_lock:
         for sid, rec in runtime_warning_state.items():
             current = result.setdefault(str(sid), {'warnings': 0, 'name': rec.get('student_name', 'Unknown'), 'violations': []})
-            current['warnings'] = max(int(current.get('warnings') or 0), int(rec.get('warnings') or 0))
+            capped_runtime = min(int(rec.get('warnings') or 0), int(getattr(warning_system, 'max_warnings', 3) if warning_system else 3))
+            current['warnings'] = max(int(current.get('warnings') or 0), capped_runtime)
             if len(rec.get('violations') or []) > len(current.get('violations') or []):
-                current['violations'] = list(rec.get('violations') or [])
+                current['violations'] = list(rec.get('violations') or [])[-3:]
             if not current.get('name'):
                 current['name'] = rec.get('student_name', 'Unknown')
-    return jsonify(result)
+    with active_exam_students_lock:
+        active_ids = set(str(sid) for sid in active_exam_students)
+    filtered = {sid: data for sid, data in result.items() if sid in active_ids}
+    return jsonify(filtered)
 
 @app.route('/api/admin-active-students')
 @require_role('ADMIN')
@@ -4226,7 +4553,6 @@ if MONITORING_ENABLED and socketio:
             'EYES_CLOSED': 'EYES_CLOSED', 'eyes_closed': 'EYES_CLOSED',
             'GAZE_LEFT': 'GAZE_LEFT', 'gaze_left': 'GAZE_LEFT',
             'GAZE_RIGHT': 'GAZE_RIGHT', 'gaze_right': 'GAZE_RIGHT',
-            'GAZE_UP': 'GAZE_UP', 'gaze_up': 'GAZE_UP',
             'GAZE_DOWN': 'GAZE_DOWN', 'gaze_down': 'GAZE_DOWN',
             'VOICE_DETECTED': 'VOICE_DETECTED', 'voice_detected': 'VOICE_DETECTED',
             'DISTRACTION': 'DISTRACTION', 'distraction': 'DISTRACTION',

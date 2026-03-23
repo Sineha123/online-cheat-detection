@@ -747,448 +747,83 @@ class AdminMonitor:
                         break
                 
                 try:
-                    # 1. GET FRAME
-                    frame = None
-                    no_live_frame = False
-                    try:
-                        # Prefer browser-uploaded frame for remote monitoring.
-                        # Allow slightly stale frames for recording continuity (prevents black recordings).
-                        frame = get_latest_student_frame(student_id, max_age_sec=30.0)
-                        if frame is None and ALLOW_SERVER_CAMERA_FALLBACK:
-                            frame = camera_streamer.read()
-                    except Exception as cam_err:
-                        print(f"❌ Camera read error: {cam_err}")
-                        time.sleep(0.5)
-                        continue
+                    # 1. GET PRE-PROCESSED FRAME FROM APP.PY
+                    # Use get_latest_student_frame from app.py
+                    item = {}
+                    with latest_student_frames_lock:
+                        # Access the shared dictionary directly to get the rich item object
+                        item = latest_student_frames.get(str(student_id), {})
                     
+                    frame = item.get('processed_frame')
+                    b64_frame = item.get('processed_frame_b64')
+                    snapshot = item.get('status_snapshot', {})
+                    last_labels = item.get('last_prohibited_object_labels', [])
+                    no_live_frame = False
+
+                    if frame is None and ALLOW_SERVER_CAMERA_FALLBACK:
+                        try:
+                            frame = camera_streamer.read()
+                        except Exception as cam_err:
+                            print(f"❌ Camera read error: {cam_err}")
+                            time.sleep(0.5)
+                            continue
+                            
                     if frame is None:
                         no_live_frame = True
                         if CV2_AVAILABLE and np is not None:
                             frame = np.zeros((480, 640, 3), dtype=np.uint8)
                             cv2.putText(frame, "NO STUDENT CAMERA FRAME", (120, 240),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                            b64_frame = base64.b64encode(jpeg.tobytes()).decode('ascii')
                         else:
                             time.sleep(0.4)
                             continue
 
-                    if auto_saver:
+                    if auto_saver and frame is not None:
                         auto_saver.add_frame(frame)
                     
-                    # ---------------------------------------------------------
-                    # DISABLE REDUNDANT VISION PIPELINE
-                    # app.py (_run_student_frame_detection) is the single 
-                    # source of truth for all face/object/pose warnings.
-                    # Running a second pipeline here causes conflicts, duplicate 
-                    # warnings, and extreme CPU load.
-                    # ---------------------------------------------------------
-                    ENABLE_SECONDARY_VISION = False
-                    
-                    if not ENABLE_SECONDARY_VISION:
-                        # Only handle audio violations here
-                        audio_violation = False
-                        if audio_monitor and audio_monitor.consume_violation_event():
-                            audio_violation = True
-                            violation_buffer.append("audio_detected")
-                        
-                        # Process ONLY audio warning
-                        if audio_violation and self.warning_system:
-                            try:
-                                print(f"🎙️ Audio violation → WARNING: student={student_id}")
-                                terminated = self.warning_system.add_warning(student_id, "VOICE_DETECTED", "Voice/Noise Detected")
-                                if terminated:
-                                    print(f"🛑 EXAM TERMINATED for student {student_id} - 3 warnings reached")
-                                    with self.lock:
-                                        self.running[student_id] = False
-                                        # (Socket emit handled by app.py)
-                            except Exception as e:
-                                print(f"⚠️ Warning error: {e}")
-                                
-                        # EMIT FRAME TO ADMIN DASHBOARD (Fix for missing live feed)
-                        if frame is not None and not no_live_frame:
-                            try:
-                                _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                                b64_frame = base64.b64encode(jpeg.tobytes()).decode('ascii')
-                                if self.socketio and b64_frame:
-                                    self.socketio.emit('student_frame', {
-                                        'student_id': student_id,
-                                        'student_name': student_name,
-                                        'frame': b64_frame,
-                                        'timestamp': time.time()
-                                    }, namespace='/admin')
-                            except Exception as e:
-                                print(f"Socket emit error for {student_id}: {e}")
-                        
-                        time.sleep(1.0 / self.fps)
-                        continue
-
-                    # 2. FACE DETECTION (Dynamic)
-                    faces = []
-                    people_hog_count = 0
-                    if (face_count == 0 or no_live_frame):
-                        face_status = "No Face"
-                        if frame_count > no_face_grace_frames:
-                            violation_buffer.append("no_face")
-                    elif face_count > 1:
-                        face_status = f"Multiple Faces"
-                        violation_buffer.append("multiple_faces")
-                    else:
-                        violation_buffer.append("normal")
-                        # Single-face quality/range checks: too far, too close, or off-frame.
-                        try:
-                            fh, fw = frame.shape[:2]
-                            if faces:
-                                primary = max(faces, key=lambda f: int(f.get('w', 0)) * int(f.get('h', 0)))
-                                fx, fy = int(primary['x']), int(primary['y'])
-                                fw_box, fh_box = int(primary['w']), int(primary['h'])
-                                area_ratio = (fw_box * fh_box) / max(1.0, float(fw * fh))
-                                cx = fx + (fw_box / 2.0)
-                                cy = fy + (fh_box / 2.0)
-                                if area_ratio < 0.06:
-                                    violation_buffer.append("face_too_far")
-                                if area_ratio > 0.55:
-                                    violation_buffer.append("face_too_close")
-                                if cx < (0.22 * fw) or cx > (0.78 * fw) or cy < (0.16 * fh) or cy > (0.84 * fh):
-                                    violation_buffer.append("face_out_of_frame")
-                                # Rapid head/face movement detection (OpenCV face-box based)
-                                st = self.face_motion_state.get(student_id, {'cx': cx, 'cy': cy, 'rapid_frames': 0})
-                                dx = abs(cx - st.get('cx', cx))
-                                dy = abs(cy - st.get('cy', cy))
-                                # normalized movement vs frame size
-                                motion = max(dx / max(1.0, fw), dy / max(1.0, fh))
-                                prev_area = float(st.get('area_ratio', area_ratio))
-                                area_delta = abs(area_ratio - prev_area) / max(0.02, prev_area)
-                                motion_score = max(motion, area_delta * 0.6)
-                                if motion_score > 0.012:
-                                    st['rapid_frames'] = int(st.get('rapid_frames', 0)) + 1
-                                else:
-                                    st['rapid_frames'] = max(0, int(st.get('rapid_frames', 0)) - 1)
-                                st['cx'], st['cy'] = cx, cy
-                                st['area_ratio'] = area_ratio
-                                self.face_motion_state[student_id] = st
-                                if st['rapid_frames'] >= 1:
-                                    violation_buffer.append("head_movement")
-                                    st['rapid_frames'] = 0
-                        except Exception:
-                            pass
-
-                    # 3. EYE GAZE TRACKING
-                    gaze_direction = "Center"
-                    eyes_closed = False
-                    if eye_tracker:
-                        try:
-                            gaze_direction, eyes_closed, frame = eye_tracker.detect_gaze(frame)
-                            if gaze_direction not in ["Center", "Unknown"]:
-                                violation_buffer.append(f"gaze_{gaze_direction}")
-                            if eyes_closed:
-                                violation_buffer.append("eyes_closed")
-                        except Exception:
-                            pass
-                    if (gaze_direction in ["Center", "Unknown"]) and FACE_REC_AVAILABLE and (not MEDIAPIPE_AVAILABLE):
-                        try:
-                            fallback_gaze, fallback_closed = detect_gaze_fallback(frame)
-                            gaze_direction = fallback_gaze
-                            eyes_closed = eyes_closed or fallback_closed
-                            if fallback_gaze not in ["Center", "Unknown"]:
-                                violation_buffer.append(f"gaze_{fallback_gaze}")
-                            if fallback_closed:
-                                violation_buffer.append("eyes_closed")
-                        except Exception:
-                            pass
-
-                    # 4. OBJECT DETECTION - YOLOv4-tiny (cell phone, book, laptop, etc.)
-                    objects = []
-                    try:
-                        objects = detect_objects(frame, conf_threshold=0.22) if object_net_enabled and CV2_AVAILABLE else []
-                        if object_net_enabled and CV2_AVAILABLE:
-                            lower_pass = detect_objects(frame, conf_threshold=0.14)
-                            if lower_pass:
-                                objects.extend(lower_pass)
-                            # Contrast-enhanced pass for weak/low-light objects.
-                            try:
-                                ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-                                y, cr, cb = cv2.split(ycrcb)
-                                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                                y2 = clahe.apply(y)
-                                enh = cv2.cvtColor(cv2.merge([y2, cr, cb]), cv2.COLOR_YCrCb2BGR)
-                                enhanced_pass = detect_objects(enh, conf_threshold=0.11)
-                                if enhanced_pass:
-                                    objects.extend(enhanced_pass)
-                            except Exception:
-                                pass
-                    except Exception as oe:
-                        pass
-                    
-                    # Only flag objects that are actually prohibited.
-                    # Normalize label variants (e.g., "cellphone", "mobile phone", "smartphone").
-                    prohibited_aliases = {
-                        'cellphone': 'cell phone',
-                        'mobilephone': 'cell phone',
-                        'smartphone': 'cell phone',
-                        'mobile': 'cell phone',
-                        'phone': 'cell phone',
-                        'electronicdevice': 'cell phone',
-                        'electronic device': 'cell phone',
-                        'device': 'cell phone',
-                    }
-                    prohibited_base = {'cell phone', 'book', 'laptop', 'keyboard', 'mouse', 'remote'}
-
-                    def normalize_label(raw):
-                        label = str(raw or '').strip().lower()
-                        compact = ''.join(ch for ch in label if ch.isalnum())
-                        label = prohibited_aliases.get(compact, label)
-                        return label
-
-                    prohibited_objects = []
-                    person_objects = []
-                    for obj in objects:
-                        norm_label = normalize_label(obj.get('label'))
-                        conf = float(obj.get('confidence', 0.0))
-                        if norm_label == 'person' and conf >= 0.30:
-                            person_objects.append(obj)
-                        is_phone_like = ('phone' in norm_label) or ('mobile' in norm_label) or ('smart' in norm_label)
-                        # Strict mode requested: flag any confident non-person object as prohibited.
-                        # Only treat as prohibited if confidence is strong enough to match server threshold
-                        strict_non_person = (norm_label != 'person' and conf >= 0.60)
-                        if norm_label in prohibited_base or is_phone_like or strict_non_person:
-                            normalized_obj = dict(obj)
-                            normalized_obj['label'] = 'cell phone' if is_phone_like else norm_label
-                            prohibited_objects.append(normalized_obj)
-
-                    # Additional fallback: if detector sees >1 person, treat as multi-face.
-                    if len(person_objects) > 1 or people_hog_count >= 2:
-                        violation_buffer.append("multiple_faces")
-                    
-                    for obj in prohibited_objects:
-                        violation_buffer.append(f"object_{obj.get('label', 'unknown')}")
-
-                    # OCR detection of written material (notes/book pages/printed text)
-                    ocr_detected, ocr_details = self._detect_written_material_ocr(frame, student_id, frame_count)
-                    if ocr_detected:
-                        violation_buffer.append("object_written material")
-                    
-                    # 5. AUDIO DETECTION
+                    # 2. AUDIO MODALITY (Only process audio here)
                     audio_violation = False
                     if audio_monitor and audio_monitor.consume_violation_event():
                         audio_violation = True
                         violation_buffer.append("audio_detected")
                     
-                    # 6. PROCESS VIOLATIONS — Instant warning on prohibited object
-                    violation_counts = {}
-                    for v in violation_buffer:
-                        violation_counts[v] = violation_counts.get(v, 0) + 1
-                    
-                    # Map camera violation types → DB/warning_system enum types
-                    CAMERA_VTYPE_MAP = {
-                        'multiple_faces':     'MULTIPLE_FACES',
-                        'no_face':            'NO_FACE',
-                        'face_too_far':       'NO_FACE',
-                        'face_too_close':     'NO_FACE',
-                        'face_out_of_frame':  'NO_FACE',
-                        'head_movement':      'HEAD_MOVEMENT',
-                        'eyes_closed':        'EYES_CLOSED',
-                        'gaze_Looking Left':  'GAZE_LEFT',
-                        'gaze_Looking Right': 'GAZE_RIGHT',
-                        'gaze_Looking Up':    'GAZE_UP',
-                        'gaze_Looking Down':  'GAZE_DOWN',
-                        'object_cell phone':  'PROHIBITED_OBJECT',
-                        'object_book':        'PROHIBITED_OBJECT',
-                        'object_laptop':      'PROHIBITED_OBJECT',
-                        'object_keyboard':    'PROHIBITED_OBJECT',
-                        'object_mouse':       'PROHIBITED_OBJECT',
-                        'object_remote':      'PROHIBITED_OBJECT',
-                        'object_written material': 'PROHIBITED_OBJECT',
-                        'audio_detected':     'VOICE_DETECTED',
-                    }
-                    
-                    # ── WARNING COOLDOWN CONFIG ──────────────────────────────────
-                    # Prohibited objects: warn IMMEDIATELY (1st frame hit),
-                    #   then block re-warning for 15 frames (~3s at 5fps)
-                    # Face issues:  require 3 consistent frames, then 20-frame block
-                    INSTANT_TYPES = {
-                        'object_cell phone', 'object_book', 'object_laptop',
-                        'object_keyboard', 'object_mouse', 'object_remote', 'object_written material'
-                    }
-                    CONSISTENT_THRESHOLD = 3   # default frames needed for non-instant violations
-                    INSTANT_COOLDOWN     = 8   # frames between repeat phone/book warnings (~1.6s at 5fps)
-                    FACE_COOLDOWN        = 15  # frames between face violation warnings (~3s at 5fps)
-                    THRESHOLD_BY_TYPE = {
-                        'multiple_faces': 1,  # raise quickly when second face appears
-                        'audio_detected': 1,  # strong voice sensitivity
-                        'no_face': 1,
-                        'face_too_far': 1,
-                        'face_too_close': 1,
-                        'face_out_of_frame': 1,
-                        'head_movement': 1,
-                        'eyes_closed': 1,
-                        'gaze_Looking Left': 1,
-                        'gaze_Looking Right': 1,
-                        'gaze_Looking Up': 1,
-                        'gaze_Looking Down': 1,
-                    }
-                    COOLDOWN_BY_TYPE = {
-                        'multiple_faces': 5,
-                        'audio_detected': 8,
-                        'no_face': 8,
-                        'face_too_far': 5,
-                        'face_too_close': 5,
-                        'face_out_of_frame': 5,
-                        'head_movement': 4,
-                        'object_written material': 16,
-                        'gaze_Looking Left': 5,
-                        'gaze_Looking Right': 5,
-                        'gaze_Looking Up': 5,
-                        'gaze_Looking Down': 5,
-                    }
-                    
-                    current_violations = []
-                    
-                    if student_id not in self.violation_cooldown:
-                        self.violation_cooldown[student_id] = {}
-                    cooldown = self.violation_cooldown[student_id]
-                    
-                    for vtype, count in violation_counts.items():
-                        if vtype == 'normal':
-                            continue
-                        
-                        is_instant = (vtype in INSTANT_TYPES) or str(vtype).startswith('object_')
-                        threshold  = THRESHOLD_BY_TYPE.get(vtype, (1 if is_instant else CONSISTENT_THRESHOLD))
-                        block_dur  = COOLDOWN_BY_TYPE.get(vtype, (INSTANT_COOLDOWN if is_instant else FACE_COOLDOWN))
-                        
-                        if count < threshold:
-                            continue
-                        
-                        current_violations.append(vtype)
-                        
-                        # Log to auto-saver
-                        if auto_saver:
-                            severity = 'high' if is_instant or vtype == 'multiple_faces' else 'medium'
-                            auto_saver.add_violation(vtype, severity, frame)
-                        
-                        # Check cooldown — only warn if enough frames have passed
-                        last_warned = cooldown.get(vtype, -block_dur)  # -block_dur = never warned yet
-                        if frame_count - last_warned >= block_dur:
-                            mapped_type = CAMERA_VTYPE_MAP.get(vtype, 'PROHIBITED_OBJECT')
-                            
-                            # Build human-readable details for popup
-                            label_map = {
-                                'object_cell phone': '📱 Cell Phone',
-                                'object_book':       '📖 Book',
-                                'object_laptop':     '💻 Laptop',
-                                'object_keyboard':   '⌨️ External Keyboard',
-                                'object_mouse':      '🖱️ Mouse',
-                                'object_remote':     '🎮 Remote',
-                                'object_written material': '📝 Written Material',
-                                'multiple_faces':    '👥 Multiple Faces',
-                                'no_face':           '😶 No Face Detected',
-                                'face_too_far':      '📏 Face Too Far From Camera',
-                                'face_too_close':    '🔍 Face Too Close To Camera',
-                                'face_out_of_frame': '🧭 Face Out Of Camera Range',
-                                'head_movement':    '🎯 Excessive Head Movement',
-                                'eyes_closed':       '😴 Eyes Closed',
-                                'gaze_Looking Left':  '👀 Looking Left',
-                                'gaze_Looking Right': '👀 Looking Right',
-                                'gaze_Looking Up':    '👀 Looking Up',
-                                'gaze_Looking Down':  '👀 Looking Down',
-                                'audio_detected':    '🔊 Voice/Noise Detected',
-                            }
-                            if vtype == 'object_written material' and ocr_details:
-                                details = ocr_details
-                            else:
-                                details = f"{label_map.get(vtype, vtype)} detected by camera"
-                            
-                            if self.warning_system:
-                                with active_exam_students_lock:
-                                    exam_active = int(student_id) in active_exam_students
+                    if audio_violation and self.warning_system:
+                        try:
+                            print(f"🎙️ Audio violation → WARNING: student={student_id}")
+                            terminated = self.warning_system.add_warning(student_id, "VOICE_DETECTED", "Voice/Noise Detected")
+                            if terminated:
+                                print(f"🛑 EXAM TERMINATED for student {student_id} - 3 warnings reached")
                                 with self.lock:
-                                    monitor_running = bool(self.running.get(student_id, False))
-                                # In dev/reload flows active_exam_students can desync briefly;
-                                # if monitoring thread is running, still emit warnings.
-                                if not (exam_active or monitor_running):
-                                    continue
-                                print(f"🚨 Camera violation → WARNING: student={student_id} type={mapped_type} detail={details}")
-                                if mapped_type == 'VOICE_DETECTED':
-                                    persisted = _persist_behavior_violation(student_id, student_name, 'VOICE_DETECTED', details)
-                                    if persisted:
-                                        cooldown[vtype] = frame_count
-                                else:
-                                    terminated = self.warning_system.add_warning(student_id, mapped_type, details)
-                                    cooldown[vtype] = frame_count
-                                    if terminated:
-                                        print(f"❌ EXAM TERMINATED for student {student_id} — 3 warnings reached")
-                    
-                    # 7. DRAW ANNOTATIONS
-                    if CV2_AVAILABLE and frame is not None:
-                        # Minimal overlays: keep visual boxes/banners only (text HUD removed per UX request)
-                        face_color = (0, 255, 0) if face_count == 1 else (0, 0, 255)
+                                    self.running[student_id] = False
+                        except Exception as e:
+                            print(f"⚠️ Warning error: {e}")
 
-                        # Draw face rectangles
-                        for face in faces:
-                            f_color = (0, 255, 0) if face_count == 1 else (0, 0, 255)
-                            cv2.rectangle(
-                                frame,
-                                (face['x'], face['y']),
-                                (face['x'] + face['w'], face['y'] + face['h']),
-                                f_color, 2
-                            )
-                        
-                        # ── Draw ALL detected objects (not just prohibited) ──────
-                        OBJ_COLORS = {
-                            'cell phone': (0, 0, 255),    # RED   — prohibited
-                            'book':       (0, 0, 255),    # RED   — prohibited
-                            'laptop':     (0, 0, 255),    # RED   — prohibited
-                            'keyboard':   (0, 0, 255),    # RED   — prohibited
-                            'mouse':      (0, 0, 255),    # RED   — prohibited
-                            'remote':     (0, 0, 255),    # RED   — prohibited
-                            'person':     (255, 128, 0),  # ORANGE — informational
-                        }
-                        DEFAULT_OBJ_COLOR = (0, 255, 255)  # YELLOW — other objects
-                        
-                        for obj in objects:
-                            label = obj.get('label', 'object')
-                            conf  = obj.get('confidence', 0)
-                            ox, oy, ow, oh = obj['x'], obj['y'], obj['w'], obj['h']
-                            color = OBJ_COLORS.get(label, DEFAULT_OBJ_COLOR)
-                            
-                            cv2.rectangle(frame, (ox, oy), (ox + ow, oy + oh), color, 2)
-                            
-                            norm_label = normalize_label(label)
-                            is_prohibited = norm_label in prohibited_base
-                            tag = f"⚠ {label} {conf:.0%}" if is_prohibited else f"{label} {conf:.0%}"
-                            
-                            # Label background for readability
-                            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                            label_y = max(oy - 5, th + 5)
-                            cv2.rectangle(frame, (ox, label_y - th - 4), (ox + tw + 4, label_y + 2), color, -1)
-                            cv2.putText(frame, tag, (ox + 2, label_y - 2),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                            
-                            # Big warning banner at top for prohibited objects
-                            if is_prohibited:
-                                banner = f"!!! {label.upper()} DETECTED !!!"
-                                (bw, bh), _ = cv2.getTextSize(banner, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-                                bx = max(0, frame.shape[1] // 2 - bw // 2)
-                                cv2.rectangle(frame, (0, 0), (frame.shape[1], bh + 16), (0, 0, 200), -1)
-                                cv2.putText(frame, banner, (bx, bh + 8),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                    # 3. EMIT FRAME TO ADMIN DASHBOARD
+                    # Send the pre-processed B64 frame directly to ensure all bounding boxes (lines) are shown.
+                    if b64_frame is None and frame is not None:
+                        _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        b64_frame = base64.b64encode(jpeg.tobytes()).decode('ascii')
 
-                    # 8. EMIT FRAME TO ADMIN DASHBOARD
-                    _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    b64_frame = base64.b64encode(jpeg.tobytes()).decode('ascii')
-                    
                     if self.socketio and b64_frame:
                         try:
+                            # Reconstruct simplified object list for UI badges based on the snapshot
+                            prohibited_objects = [{'label': lbl} for lbl in last_labels]
+                            all_objects = [{'label': lbl} for lbl in item.get('last_visible_object_labels', [])]
+                            
                             self.socketio.emit('student_frame', {
                                 'student_id':      student_id,
                                 'student_name':    student_name,
                                 'frame':           b64_frame,
-                                'face_count':      face_count,
-                                'face_status':     face_status,
-                                'gaze_direction':  gaze_direction,
-                                'eyes_closed':     eyes_closed,
+                                'face_count':      snapshot.get('face_count', 0),
+                                'face_status':     "Normal" if snapshot.get('face_count', 0) == 1 else "No Face" if snapshot.get('face_count', 0) == 0 else "Multiple Faces",
+                                'gaze_direction':  snapshot.get('gaze_direction', 'CENTER'),
+                                'eyes_closed':     snapshot.get('eyes_closed', False),
                                 'objects':         prohibited_objects,
-                                'all_objects':     objects,
+                                'all_objects':     all_objects,
                                 'audio_violation': audio_violation,
-                                'violations':      current_violations,
+                                'violations':      list(violation_buffer),
                                 'warnings_count':  self.warning_system.get_warnings(student_id) if self.warning_system else 0,
                                 'timestamp':       time.time()
                             }, namespace='/admin')

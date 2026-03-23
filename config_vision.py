@@ -1,12 +1,26 @@
 # Configuration Constants
+import os
 
 # Camera Config
 CAMERA_ID = 0
 TARGET_FPS = 30
 
+# Feature Toggles
+# Set these to False to temporarily disable heavy subsystems without code removal.
+ENABLE_OBJECT_DETECTION = True   # keep object/person boxes active
+ENABLE_GAZE = False
+ENABLE_WARNINGS = True   # keep warning pipeline active
+ENABLE_CAMERA_OBSTRUCTION = False  # keep blur/covered warnings off
+DISABLE_FACE_WARNINGS = False
+DISABLE_VOICE_WARNINGS = False
+
 # YOLO Settings
-YOLO_MODEL_NAME = "yolov8n.pt"
-YOLO_SKIP_FRAMES = 1   # run YOLO every frame for snappier detection
+# Switch to the stronger YOLOv8m checkpoint for better small-object accuracy.
+YOLO_MODEL_PATH = os.path.join("models", "yolov8m.pt")
+# Backward compatibility for legacy imports
+YOLO_MODEL_NAME = YOLO_MODEL_PATH
+# Run object detector every N frames to balance CPU and latency. (1 = every frame)
+OBJECT_PROCESS_EVERY_N = 1
 YOLO_BANNED_CLASSES = [
     43, # knife (often pen)
     63, # laptop
@@ -22,6 +36,55 @@ YOLO_BANNED_CLASSES = [
 YOLO_PERSON_CLASS = 0
 YOLO_PERSON_CONFIDENCE = 0.65        # tighten to reduce phantom humans (curtains/shadows)
 YOLO_BANNED_CONFIDENCE = 0.45        # tuned for phones/books
+
+# Prohibited object set and thresholds
+PROHIBITED_OBJECTS = [
+    "phone", "book", "paper", "usb",
+    "headphones", "pen", "camera",
+    "smartwatch"
+]
+DEFAULT_OBJECT_THRESHOLD = 0.50
+OBJECT_THRESHOLDS = {
+    "book": 0.40,
+    "phone": 0.40,
+    "paper": 0.45,
+    "usb": 0.50,
+    "headphones": 0.50,
+    "pen": 0.55,
+    "camera": 0.60,
+    "smartwatch": 0.50,
+}
+
+# Area validation (ratio of bbox area to frame area)
+AREA_LIMITS = {
+    "book": (0.02, 0.40),      # widened for closer/bigger covers
+    "paper": (0.02, 0.35),
+    "phone": (0.005, 0.30),
+    "usb": (0.005, 0.05),
+    "pen": (0.002, 0.03),
+    "smartwatch": (0.005, 0.08),
+}
+
+# Texture / edge filters to suppress flat walls and glare patches
+TEXTURE_VARIANCE_THRESHOLD = 25.0   # looser to keep books/paper in low light
+EDGE_DENSITY_THRESHOLD = 0.015      # looser to keep textured covers
+
+# Book-specific heuristic thresholds (OpenCV fallback)
+BOOK_MIN_AREA_RATIO = 0.02
+BOOK_MAX_AREA_RATIO = 0.55
+BOOK_MIN_ASPECT = 0.30     # allow portrait/landscape
+BOOK_MAX_ASPECT = 1.90
+BOOK_EDGE_DENSITY = 0.005  # covers often have patterns even if low contrast
+
+# Spatial filters
+OBJECT_TOP_IGNORE_RATIO = 0.05  # smaller ignore band so near-ear phones aren’t skipped
+OBJECT_MIN_PIXELS = 1500        # allow smaller ear-level objects
+
+# Temporal persistence
+TEMPORAL_FRAMES_REQUIRED = 1    # fastest confirmation (pre-change)
+
+# Optional advanced detector
+GROUNDING_DINO_ENABLED = str(os.getenv("GROUNDING_DINO_ENABLED", "0")).lower() not in ("0", "false")
 
 # Person box sanity bounds (ratios relative to frame) to keep small / partial people
 PERSON_MIN_AREA_RATIO = 0.02         # ignore tiny ghost shapes in background
@@ -54,14 +117,14 @@ WARNING_COOLDOWN_SEC = 5.0  # 5 seconds between penalty accumulations to avoid r
 INSTANT_PENALTY_THRESHOLD = 3 # If >= 3 rules broken simultaneously, bypass cooldown
 
 # Temporal Debouncing (Seconds a condition must be held before triggering a warning)
-TIME_NO_FACE = 3.5  # Face block tolerance (~3-4s)
+TIME_NO_FACE = 1.0  # faster no-face trigger (face warnings will be muted separately)
 TIME_HEAD_TURNED = 4.5  # Set to looser than gaze
 TIME_EYES_CLOSED = 1.0
 TIME_GAZING = 3.5       # User requested 3-4s for staring away
-TIME_MULTIPLE_PERSONS = 0.4
+TIME_MULTIPLE_PERSONS = 0.4  # slight debounce to avoid one-frame spikes
 TIME_BANNED_OBJECT = 0.5             # legacy time-based path (kept for compatibility)
-# Frame-based debounce for banned objects
-BANNED_FRAMES_REQUIRED = 10          # ~10 consecutive frames before warning
+# Frame-based debounce for banned objects (handled in detector; keep lightweight here)
+BANNED_FRAMES_REQUIRED = 1
 
 # Colors (BGR)
 COLOR_WARNING = (0, 0, 255)    # Red

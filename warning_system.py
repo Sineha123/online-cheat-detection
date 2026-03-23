@@ -18,12 +18,12 @@ if hasattr(sys.stdout, "reconfigure"):
 class WarningSystem:
     """Track warnings per student and emit events when thresholds reached."""
     
-    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=5):
+    def __init__(self, socketio_instance, admin_monitor=None, max_warnings=3):
         self.socketio = socketio_instance
         self.admin_monitor = admin_monitor
         self.max_warnings = max_warnings
         auto_env = os.getenv('AUTO_TERMINATE_DEFAULT', '1')
-        # Default ON so the Nth warning is shown then termination occurs after 3 seconds.
+        # Default ON so the Nth warning is shown then termination occurs after a short grace (2s).
         self.auto_terminate = str(auto_env).strip() not in ('0', 'false', 'False')
         self.lock = threading.Lock()
         self.warnings = {}  # student_id -> count
@@ -34,26 +34,24 @@ class WarningSystem:
         self.termination_timer = {}  # student_id -> Timer handle
 
         # Global minimum gap between any two warnings (seconds)
-        self.global_gap_seconds = 5.0
-        # Per-type gaps — critical items fire faster; minor distractions fire slower
+        # Requested behavior: every warning must be spaced by at least 3 seconds.
+        self.global_gap_seconds = 3.0
+        # Per-type gaps — align to the same 3s floor so nothing fires faster.
         self.type_gap_seconds = {
-            # Immediate threats — fire quickly but not spam
-            'PROHIBITED_OBJECT':    5.0,
-            'MULTIPLE_FACES':       4.0,
+            'PROHIBITED_OBJECT':    3.0,
+            'MULTIPLE_FACES':       3.0,
             'TAB_SWITCH':           3.0,
             'PROHIBITED_SHORTCUT':  3.0,
-            'VOICE_DETECTED':       8.0,   # audio: only after 8s continuous
-            'IDENTITY_MISMATCH':    5.0,
-            # Behavioural distractions — need longer persistence
-            'NO_FACE':             10.0,   # must be absent for >10s
-            'DISTRACTION':         10.0,   # gaze/head away — needs repetition
-            'HEAD_MOVEMENT':       10.0,
-            'STUDENT_LEFT_SEAT':    5.0,
-            'EYES_CLOSED':          8.0,
-            'GAZE_LEFT':           10.0,
-            'GAZE_RIGHT':          10.0,
-            'GAZE_UP':             10.0,
-            'GAZE_DOWN':           10.0,
+            'VOICE_DETECTED':       3.0,
+            'IDENTITY_MISMATCH':    3.0,
+            'NO_FACE':              3.0,
+            'DISTRACTION':          3.0,
+            'HEAD_MOVEMENT':        3.0,
+            'STUDENT_LEFT_SEAT':    3.0,
+            'EYES_CLOSED':          3.0,
+            'GAZE_LEFT':            3.0,
+            'GAZE_RIGHT':           3.0,
+            'GAZE_DOWN':            3.0,
         }
         self.type_gap_seconds['TERMINATED_BY_ADMIN'] = 0.0
 
@@ -163,7 +161,7 @@ class WarningSystem:
                         'warnings': count
                     }, namespace='/admin')
                 return False
-            # Auto-terminate, but after a 3s grace so 3rd warning shows
+            # Auto-terminate, but after a 3s grace so the 3rd warning popup is visible
             def do_term():
                 reason = f"Reached {self.max_warnings} warnings for violations: {vtype}"
                 print(f"🚨 TERMINATING EXAM for student {student_id}: {reason}")

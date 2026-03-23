@@ -24,6 +24,11 @@ pyttsx3==2.90
 # torch==2.0.1
 # torchvision==0.15.2
 ultralytics==8.3.0
+# Optional hybrid detection stack
+# transformers==4.37.0
+# supervision==0.17.1
+# groundingdino-py==0.1.0
+# torch==2.1.0
 
 # Utilities
 keyboard==0.13.5
