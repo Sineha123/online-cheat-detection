@@ -100,8 +100,8 @@ const NIQAB_MODE_ENABLED = true;
 const EYE_PAIR_MIN_SEPARATION = 40;
 const EYE_PAIR_MAX_SEPARATION = 200;
 const GAZE_HORIZONTAL_THRESHOLD = 0.32;
-const GAZE_VERTICAL_DOWN_THRESHOLD = 0.34;
-const GAZE_VERTICAL_UP_THRESHOLD = 0.24;
+const GAZE_VERTICAL_DOWN_THRESHOLD = 0.45;
+const GAZE_VERTICAL_UP_THRESHOLD = 0.20;
 const GAZE_HORIZONTAL_SUSTAIN_MS = 1500;
 const GAZE_VERTICAL_SUSTAIN_MS = 2e3;
 const BOOK_LABELS = ["book", "notebook", "paper", "magazine", "journal", "document", "folder", "textbook", "copy", "register"];
@@ -1156,11 +1156,11 @@ class ProctorCore {
     if ((vertDownExceeded || vertUpExceeded) && !this.gazeStartV) this.gazeStartV = now;
     const horizSustained = this.gazeStartH && now - this.gazeStartH >= GAZE_HORIZONTAL_SUSTAIN_MS;
     const vertSustained = this.gazeStartV && now - this.gazeStartV >= GAZE_VERTICAL_SUSTAIN_MS;
-    if (Math.abs(yaw) > 15) {
+    if (Math.abs(yaw) > 25) {
       risk += 10;
       reasons.push("Head yaw off-axis");
     }
-    if (Math.abs(pitch) > 12) {
+    if (Math.abs(pitch) > 20) {
       risk += 9;
       reasons.push("Head pitch off-axis");
     }

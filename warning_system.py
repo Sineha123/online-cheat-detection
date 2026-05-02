@@ -47,8 +47,8 @@ class WarningSystem:
             'VOICE_DETECTED':       6.0,   # audio: only after 8s continuous
             'IDENTITY_MISMATCH':    4.0,
             # Behavioural distractions — need longer persistence
-            'NO_FACE':              6.0,   # must be absent for >10s
-            'DISTRACTION':          2.0,   # gaze/head away — needs repetition
+            'NO_FACE':              1.5,   # detect quickly
+            'DISTRACTION':          1.5,   # gaze/head away — needs repetition
             'HEAD_MOVEMENT':        1.0,
             'HEAD_DOWN':            5.0,
             'STUDENT_LEFT_SEAT':    4.0,
