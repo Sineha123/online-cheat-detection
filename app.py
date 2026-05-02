@@ -1020,6 +1020,18 @@ def login():
             except Exception:
                 mysql.connection.rollback()
 
+        if role == 'STUDENT':
+            try:
+                cur.execute("SELECT MAX(Attempts) FROM exam_results WHERE StudentID=%s", (student_id,))
+                row = cur.fetchone()
+                max_attempts = int(row[0]) if row and row[0] is not None else 0
+                if max_attempts >= 5:
+                    cur.close()
+                    flash('You have used all 5 exam attempts. You are permanently dismissed and cannot retake this exam.', 'login_error')
+                    return redirect(url_for('main'))
+            except Exception as e:
+                logger.error(f"Error checking attempts limit during login: {e}")
+
         session.permanent = True
         user_data = {
             "Id": str(student_id),
@@ -1606,24 +1618,63 @@ def preExamFaceVerify():
     try:
         student_id = int(user['Id'])
         
-        # The backend AI Vision Engine was removed in favor of the WASM frontend engine.
-        # Just verify that a valid frame was transmitted.
-        session['face_verified_for_exam'] = True
-        session['student_face_verified_at'] = time.time()
+        # Load profile picture from DB
+        cur = mysql.connection.cursor()
+        cur.execute("SELECT Profile FROM students WHERE ID=%s", (student_id,))
+        row = cur.fetchone()
+        cur.close()
         
-        return jsonify({
-            'ok': True,
-            'matched': True,
-            'distance': 0.0
-        }), 200
+        if not row or not row[0]:
+            return jsonify({'ok': False, 'matched': False, 'error': 'Profile image not found in database'}), 400
+            
+        profile_filename = row[0]
+        profile_path = os.path.join(app.root_path, 'static', 'Profiles', profile_filename)
+        if not os.path.exists(profile_path):
+            profile_path = os.path.join(app.root_path, 'static', 'profiles', profile_filename)
+            
+        if not os.path.exists(profile_path):
+            return jsonify({'ok': False, 'matched': False, 'error': 'Profile image file missing on server'}), 400
+            
+        import cv2 as _cv2
+        import numpy as _np
+        from deepface import DeepFace
         
-        return jsonify({
-            'ok': True,
-            'matched': True,
-            'distance': 0.0,
-            'threshold': 0.45,
-            'message': 'Face verified successfully'
-        })
+        image_b64 = image_data.split(',', 1)[1] if ',' in image_data else image_data
+        img_bytes = base64.b64decode(image_b64)
+        nparr = _np.frombuffer(img_bytes, _np.uint8)
+        frame = _cv2.imdecode(nparr, _cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            return jsonify({'ok': False, 'matched': False, 'error': 'Invalid image format'}), 400
+            
+        # Verify face against profile
+        try:
+            result = DeepFace.verify(
+                img1_path=frame, 
+                img2_path=profile_path, 
+                model_name="Facenet", 
+                enforce_detection=True
+            )
+            
+            if result.get("verified"):
+                session['face_verified_for_exam'] = True
+                session['student_face_verified_at'] = time.time()
+                return jsonify({
+                    'ok': True,
+                    'matched': True,
+                    'distance': result.get("distance", 0.0)
+                }), 200
+            else:
+                return jsonify({
+                    'ok': True,
+                    'matched': False,
+                    'distance': result.get("distance", 0.0),
+                    'error': 'Face does not match registered profile. Please ensure proper lighting and alignment.'
+                }), 200
+                
+        except ValueError:
+            return jsonify({'ok': False, 'matched': False, 'error': 'No face detected in webcam. Please align your face.'}), 200
+
     except Exception as e:
         logger.error(f"preExamFaceVerify error: {e}", exc_info=True)
         return jsonify({'ok': False, 'matched': False, 'error': 'Verification failed'}), 500
