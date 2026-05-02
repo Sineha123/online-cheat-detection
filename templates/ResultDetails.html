@@ -97,20 +97,17 @@
         .stat-card .stat-value { font-size: 26px; font-weight: 800; color: var(--gray-900); }
         .stat-card .stat-label { font-size: 12px; color: var(--gray-700); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
 
-        .perf-card {
-            background: var(--light); border-radius: 20px; padding: 28px;
-            box-shadow: var(--shadow-md); border: 1px solid var(--gray-200); margin-bottom: 30px;
+        .accordion-card {
+            background: var(--light); border-radius: 12px; margin-bottom: 15px;
+            box-shadow: var(--shadow-sm); border: 1px solid var(--gray-200); overflow: hidden;
         }
-        .perf-card h4 { font-size: 18px; font-weight: 700; margin-bottom: 18px; color: var(--gray-900); }
-        .perf-bar { height: 14px; background: var(--gray-100); border-radius: 10px; overflow: hidden; }
-        .perf-fill { height: 100%; border-radius: 10px; background: var(--primary-gradient); transition: width 1.5s ease; }
-        .perf-labels { display: flex; justify-content: space-between; font-size: 13px; color: var(--gray-700); margin-top: 8px; }
-
-        .violations-card {
-            background: var(--light); border-radius: 20px; padding: 28px;
-            box-shadow: var(--shadow-md); border: 1px solid var(--gray-200);
+        .accordion-header {
+            background: var(--gray-50); padding: 20px 25px; cursor: pointer;
+            display: flex; justify-content: space-between; align-items: center;
+            font-weight: 700; color: var(--gray-900); transition: background 0.3s;
         }
-        .violations-card h4 { font-size: 18px; font-weight: 700; margin-bottom: 20px; color: var(--gray-900); }
+        .accordion-header:hover { background: var(--gray-100); }
+        .accordion-body { padding: 25px; display: none; border-top: 1px solid var(--gray-200); }
 
         table { width: 100%; border-collapse: collapse; }
         table thead tr { background: var(--primary-gradient); color: white; }
@@ -186,159 +183,138 @@
 
         <main>
             <div class="head-title">
-                <h1>Result Details</h1>
+                <h1>Student Attempt History</h1>
                 <ul class="breadcrumb">
                     <li><a href="{{ url_for('adminResults') }}">Results</a></li>
                     <li><i class='bx bx-chevron-right'></i></li>
-                    <li class="active"><a href="#">{{ result.student_name }}</a></li>
+                    <li class="active"><a href="#">{{ student.student_name }}</a></li>
                 </ul>
             </div>
 
             <!-- Profile Card -->
             <div class="profile-card">
-                {% if result.student_profile %}
-                <img src="{{ url_for('static', filename='Profiles/' + result.student_profile) }}"
-                     alt="{{ result.student_name }}"
-                     onerror="this.src='https://ui-avatars.com/api/?name={{ result.student_name|urlencode }}&background=667eea&color=fff&size=110'">
+                {% if student.student_profile %}
+                <img src="{{ url_for('static', filename='Profiles/' + student.student_profile) }}"
+                     alt="{{ student.student_name }}"
+                     onerror="this.src='https://ui-avatars.com/api/?name={{ student.student_name|urlencode }}&background=667eea&color=fff&size=110'">
                 {% else %}
-                <img src="https://ui-avatars.com/api/?name={{ result.student_name|urlencode }}&background=667eea&color=fff&size=110"
-                     alt="{{ result.student_name }}">
+                <img src="https://ui-avatars.com/api/?name={{ student.student_name|urlencode }}&background=667eea&color=fff&size=110"
+                     alt="{{ student.student_name }}">
                 {% endif %}
                 <div class="info">
-                    <h2>{{ result.student_name }}</h2>
-                    <p><i class='bx bx-envelope'></i> {{ result.student_email or 'N/A' }}</p>
-                    <p><i class='bx bx-id-card'></i> Student ID: {{ result.student_id }}</p>
-                    <p><i class='bx bx-book'></i> Exam: {{ result.exam_title or 'Final Examination' }}</p>
-                    <p><i class='bx bx-time'></i> Submitted:
-                        {% if result.submission_time %}
-                            {{ result.submission_time.strftime('%d %B %Y at %H:%M') }}
-                        {% else %}N/A{% endif %}
-                    </p>
-                    <div style="margin-top:12px;">
-                        {% if result.auto_terminated %}
-                            <span class="badge-terminated"><i class='bx bxs-x-circle'></i> Exam Terminated</span>
-                        {% elif result.percentage >= 50 %}
-                            <span class="badge-pass"><i class='bx bxs-check-circle'></i> Passed</span>
-                        {% else %}
-                            <span class="badge-fail"><i class='bx bxs-x-circle'></i> Failed</span>
-                        {% endif %}
-                    </div>
+                    <h2>{{ student.student_name }}</h2>
+                    <p><i class='bx bx-envelope'></i> {{ student.student_email or 'N/A' }}</p>
+                    <p><i class='bx bx-id-card'></i> Student ID: {{ student.student_id }}</p>
+                    <p><i class='bx bx-book'></i> Exam: Final Examination</p>
                 </div>
             </div>
 
-            <!-- Stats Grid -->
+            <!-- Overall Stats Summary -->
+            <h3 style="margin-bottom:20px; font-weight:700; color:var(--gray-900);">Overall Statistics Summary</h3>
             <div class="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-icon">📊</div>
-                    <div class="stat-value">{{ result.percentage }}%</div>
-                    <div class="stat-label">Score %</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🎯</div>
-                    <div class="stat-value">{{ result.score }}/{{ (result.total_questions or 125) * 2 }}</div>
-                    <div class="stat-label">Points</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🏆</div>
-                    <div class="stat-value" style="color:{% if result.grade == 'A' %}#10b981{% elif result.grade == 'B' %}#3b82f6{% elif result.grade == 'C' %}#f59e0b{% else %}#ef4444{% endif %};">
-                        {{ result.grade }}
-                    </div>
-                    <div class="stat-label">Grade</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">⏱️</div>
-                    <div class="stat-value">
-                        {% if result.time_spent is not none %}
-                            {{ result.time_spent // 60 }}m {{ result.time_spent % 60 }}s
-                        {% else %}N/A{% endif %}
-                    </div>
-                    <div class="stat-label">Time Spent</div>
+                    <div class="stat-icon">🔄</div>
+                    <div class="stat-value">{{ summary.total_attempts }}</div>
+                    <div class="stat-label">Total Attempts Taken</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon">⚠️</div>
-                    {% set warn_display = result.warnings_issued if result.warnings_issued < 3 else 3 %}
-                    <div class="stat-value" style="color:{% if warn_display >= 3 %}#ef4444{% elif warn_display >= 1 %}#f59e0b{% else %}#10b981{% endif %};">
-                        {{ warn_display }}/3
-                    </div>
-                    <div class="stat-label">Warnings</div>
+                    <div class="stat-value" style="color:#ef4444;">{{ summary.total_terminated }}</div>
+                    <div class="stat-label">Total Terminated</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-icon">📝</div>
-                    <div class="stat-value">{{ result.total_questions or 125 }}</div>
-                    <div class="stat-label">Questions</div>
+                    <div class="stat-icon">✅</div>
+                    <div class="stat-value" style="color:#10b981;">{{ summary.total_passed }}</div>
+                    <div class="stat-label">Total Passed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⭐</div>
+                    <div class="stat-value">{{ summary.best_percentage }}%</div>
+                    <div class="stat-label">Best Percentage Score</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🚫</div>
+                    <div class="stat-value">{{ summary.total_violations }}</div>
+                    <div class="stat-label">Total Violations</div>
                 </div>
             </div>
 
-            <!-- Performance Bar -->
-            <div class="perf-card">
-                <h4><i class='bx bxs-bar-chart-alt-2'></i> Performance Overview</h4>
-                <div class="perf-bar">
-                    <div class="perf-fill" id="perfFill" style="width: {{ result.percentage }}%;
-                        background: {% if result.percentage >= 50 %}linear-gradient(90deg,#11998e,#38ef7d){% else %}linear-gradient(90deg,#eb3349,#f45c43){% endif %};"></div>
-                </div>
-                <div class="perf-labels">
-                    <span>0%</span>
-                    <span style="color:{% if result.percentage >= 50 %}#10b981{% else %}#ef4444{% endif %}; font-weight:700;">
-                        {{ result.percentage }}% — {{ result.grade }} Grade
-                    </span>
-                    <span>100%</span>
-                </div>
-                {% if result.auto_terminated %}
-                <div style="background:#fff3e0;border-radius:10px;padding:15px;margin-top:20px;border-left:4px solid #f59e0b;">
-                    <strong style="color:#ef6c00;">⚠️ Exam Terminated:</strong>
-                    <span style="color:#666;margin-left:5px;">This student's exam was automatically terminated due to reaching the maximum number of violations (3/3).</span>
-                </div>
-                {% endif %}
-            </div>
+            <!-- Per-Attempt Accordion Cards -->
+            <h3 style="margin-bottom:20px; font-weight:700; color:var(--gray-900);">Attempt History Audit Trail</h3>
+            
+            {% if attempts %}
+                {% for attempt in attempts %}
+                <div class="accordion-card">
+                    <div class="accordion-header" onclick="toggleAccordion('attempt-{{ attempt.attempt_num }}')">
+                        <div style="display:flex; align-items:center; gap:15px;">
+                            <span style="font-size:18px;">Attempt {{ attempt.attempt_num }}</span>
+                            {% if attempt.status == 'PASS' %}
+                                <span class="badge-pass" style="padding:4px 10px; font-size:11px;">PASS</span>
+                            {% elif attempt.status == 'TERMINATED' %}
+                                <span class="badge-terminated" style="padding:4px 10px; font-size:11px;">TERMINATED</span>
+                            {% else %}
+                                <span class="badge-fail" style="padding:4px 10px; font-size:11px;">FAIL</span>
+                            {% endif %}
+                            <span style="font-weight:500; font-size:14px; color:var(--gray-700);">Score: {{ attempt.percentage }}%</span>
+                        </div>
+                        <i class='bx bx-chevron-down' id="icon-{{ attempt.attempt_num }}"></i>
+                    </div>
+                    
+                    <div class="accordion-body" id="attempt-{{ attempt.attempt_num }}">
+                        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:15px; margin-bottom:20px; background:var(--gray-50); padding:20px; border-radius:10px;">
+                            <div><strong>Score:</strong> {{ attempt.score }}/{{ (attempt.total_questions or 125)*2 }}</div>
+                            <div><strong>Grade:</strong> <span style="color:{% if attempt.grade == 'A' %}#10b981{% elif attempt.grade == 'B' %}#3b82f6{% elif attempt.grade == 'C' %}#f59e0b{% else %}#ef4444{% endif %}; font-weight:bold;">{{ attempt.grade }}</span></div>
+                            <div><strong>Time Elapsed:</strong> {{ attempt.time_spent // 60 }}m {{ attempt.time_spent % 60 }}s</div>
+                            <div><strong>Submitted:</strong> {% if attempt.submission_time %}{{ attempt.submission_time.strftime('%d %B %Y at %H:%M') }}{% else %}N/A{% endif %}</div>
+                            {% if attempt.status == 'TERMINATED' or attempt.failure_reasons %}
+                            <div style="grid-column: 1 / -1; margin-top:10px; color:#ef4444;">
+                                <strong>Reason:</strong> {{ attempt.failure_reasons or 'Maximum warnings reached' }}
+                            </div>
+                            {% endif %}
+                        </div>
 
-            <!-- Violations Table -->
-            <div class="violations-card">
-                <h4><i class='bx bxs-error-circle' style="color:#ef4444;margin-right:8px;"></i>
-                    Violation Records
-                    {% if violations %}
-                    <span style="font-size:14px;font-weight:400;color:#888;margin-left:8px;">({{ violations|length }} total)</span>
-                    {% endif %}
-                </h4>
-                {% if violations %}
-                <div class="table-responsive">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>Violation Type</th>
-                                <th>Time Detected</th>
-                                <th>Details</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for v in violations %}
-                            <tr>
-                                <td><strong>{{ loop.index }}</strong></td>
-                                <td>
-                                    <span style="text-transform:capitalize;font-weight:600;color:#ef4444;">
-                                        {{ (v.type or 'Unknown') | replace('_', ' ') }}
-                                    </span>
-                                </td>
-                                <td><small style="color:#888;">{{ v.time or 'N/A' }}</small></td>
-                                <td style="color:#555;">{{ v.details or '—' }}</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+                        <h5 style="margin-bottom:15px; font-weight:600;"><i class='bx bxs-error-circle' style="color:#ef4444;margin-right:8px;"></i>Violations for this Attempt</h5>
+                        {% if attempt.violations %}
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Violation Type</th>
+                                        <th>Time Detected</th>
+                                        <th>Details</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for v in attempt.violations %}
+                                    <tr>
+                                        <td><strong>{{ loop.index }}</strong></td>
+                                        <td>
+                                            <span style="text-transform:capitalize;font-weight:600;color:#ef4444;">
+                                                {{ (v.type or 'Unknown') | replace('_', ' ') }}
+                                            </span>
+                                        </td>
+                                        <td><small style="color:#888;">{{ v.time or 'N/A' }}</small></td>
+                                        <td style="color:#555;">{{ v.details or '—' }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <div style="padding:20px; text-align:center; color:#888; background:var(--gray-50); border-radius:8px;">
+                            No violations recorded for this attempt.
+                        </div>
+                        {% endif %}
+                    </div>
                 </div>
-                {% else %}
-                <div style="text-align:center;padding:50px;color:#aaa;">
-                    <i class='bx bxs-shield-check' style="font-size:64px;color:#d1d5db;margin-bottom:15px;display:block;"></i>
-                    {% if result.auto_terminated %}
-                        <h5 style="color:#f97316;margin-bottom:8px;">No violation rows saved</h5>
-                        <p style="font-size:14px;">Exam was auto-terminated due to warnings, but violation records may not have been persisted. Check server logs.</p>
-                    {% else %}
-                        <h5 style="color:#6b7280;margin-bottom:8px;">No Violations Recorded</h5>
-                        <p style="font-size:14px;">This student completed the exam without any recorded violations.</p>
-                    {% endif %}
+                {% endfor %}
+            {% else %}
+                <div style="padding:40px; text-align:center; color:#888; background:var(--light); border-radius:12px; box-shadow:var(--shadow-sm);">
+                    No exam attempts found for this student.
                 </div>
-                {% endif %}
-            </div>
+            {% endif %}
+
         </main>
     </section>
 
@@ -350,15 +326,18 @@
             document.getElementById('content').classList.toggle('expand');
         });
 
-        // Animate performance bar
-        document.addEventListener('DOMContentLoaded', function() {
-            const fill = document.getElementById('perfFill');
-            if (fill) {
-                const targetWidth = fill.style.width;
-                fill.style.width = '0';
-                setTimeout(() => { fill.style.width = targetWidth; }, 400);
+        function toggleAccordion(id) {
+            const body = document.getElementById(id);
+            const num = id.split('-')[1];
+            const icon = document.getElementById('icon-' + num);
+            if (body.style.display === 'block') {
+                $(body).slideUp(300);
+                icon.className = 'bx bx-chevron-down';
+            } else {
+                $(body).slideDown(300);
+                icon.className = 'bx bx-chevron-up';
             }
-        });
+        }
     </script>
 </body>
 </html>

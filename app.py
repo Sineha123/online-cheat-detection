@@ -149,6 +149,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)
 # Ensure recording folders exist so admin panel can list files immediately.
 try:
     os.makedirs(_static_path('recording', 'audio'), exist_ok=True)
+    os.makedirs(_static_path('Profiles'), exist_ok=True)
 except Exception:
     pass
 
@@ -528,10 +529,21 @@ def ensure_db_schema():
                 CorrectAnswers INT DEFAULT 0,
                 SubmissionTime DATETIME DEFAULT CURRENT_TIMESTAMP,
                 Status ENUM('PASS','FAIL','TERMINATED') DEFAULT 'FAIL',
+                Attempts INT DEFAULT 1,
+                FailureReasons TEXT,
                 INDEX idx_exam_results_student (StudentID),
                 INDEX idx_exam_results_session (SessionID)
             )
         """)
+        
+        # Patch attempts logic without deleting old data
+        try:
+            cur.execute("ALTER TABLE exam_results ADD COLUMN IF NOT EXISTS Attempts INT DEFAULT 1")
+            cur.execute("ALTER TABLE exam_results ADD COLUMN IF NOT EXISTS FailureReasons TEXT")
+            cur.execute("ALTER TABLE exam_results MODIFY COLUMN Status ENUM('PASS','FAIL','TERMINATED') DEFAULT 'FAIL'")
+            cur.execute("ALTER TABLE exam_sessions MODIFY COLUMN Status ENUM('IN_PROGRESS','COMPLETED','TERMINATED') DEFAULT 'IN_PROGRESS'")
+        except Exception as patch_err:
+            pass
 
         # Violations
         cur.execute("""
@@ -558,7 +570,7 @@ if SOCKETIO_AVAILABLE:
         socketio = SocketIO(
             app,
             cors_allowed_origins="*",
-            async_mode="eventlet" if EVENTLET_AVAILABLE else None,
+            async_mode="threading",
             ping_timeout=60,
             ping_interval=20,
             max_http_buffer_size=20_000_000,
@@ -1414,6 +1426,20 @@ def exam():
     # Prepare monitoring identity
     student_id = user['Id']
     student_name = user['Name']
+    
+    # Enforce 5-attempt limit
+    try:
+        cur = mysql.connection.cursor()
+        cur.execute("SELECT MAX(Attempts) FROM exam_results WHERE StudentID=%s", (student_id,))
+        row = cur.fetchone()
+        cur.close()
+        max_attempts = int(row[0]) if row and row[0] is not None else 0
+        if max_attempts >= 5:
+            flash('You have used all 5 exam attempts. You are permanently dismissed and cannot retake this exam.', 'error')
+            return redirect(url_for('showResultFail', reason='Maximum attempts reached.'))
+    except Exception as db_err:
+        logger.error(f"Error checking attempts limit: {db_err}")
+    
     print(f"🎯 Exam page ready for {student_name} (ID: {student_id})")
     # Strict gate: student must complete pre-exam face verification before exam session can start.
     session['face_verified_for_exam'] = False
@@ -1769,20 +1795,31 @@ def examAction():
             session_id = cur.lastrowid
             logger.warning(f"No session found for student {student_id}. Created fallback session {session_id}.")
         
-        # 2. Keep only latest result per student (remove previous result rows)
-        cur.execute("DELETE FROM exam_results WHERE StudentID=%s", (student_id,))
+        # 2. Keep track of Attempts and insert new result row
+        try:
+            cur.execute("SELECT MAX(Attempts) FROM exam_results WHERE StudentID=%s", (student_id,))
+            row = cur.fetchone()
+            current_attempts = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            current_attempts = 0
+            
+        new_attempt = current_attempts + 1
 
-        # 3. Insert into exam_results using CORRECT column names
+        # 3. Insert into exam_results
+        failure_reasons = ""
+        if db_status == 'TERMINATED':
+            failure_reasons = request.args.get('reason') or "Maximum warnings reached or exam terminated by system."
+        elif db_status == 'FAIL':
+            failure_reasons = "Failed to achieve the passing score of 50%."
+
         cur.execute("""
             INSERT INTO exam_results
-                (StudentID, SessionID, Score, TotalQuestions, CorrectAnswers, SubmissionTime, Status)
-            VALUES (%s, %s, %s, %s, %s, NOW(), %s)
-        """, (student_id, session_id, percentage, total_questions, correct_answers, db_status))
+                (StudentID, SessionID, Score, TotalQuestions, CorrectAnswers, SubmissionTime, Status, Attempts, FailureReasons)
+            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s)
+        """, (student_id, session_id, percentage, total_questions, correct_answers, db_status, new_attempt, failure_reasons))
         
         # 4. Persist violations for this session (rewrite to keep result pages consistent)
         if violations_list:
-            # We keep only the latest attempt per student (exam_results is overwritten),
-            # so it's safe to rewrite this session's violations to avoid duplicates/missing rows.
             cur.execute("DELETE FROM violations WHERE SessionID=%s", (session_id,))
             for v in violations_list:
                 raw_type = v.get('type', 'TAB_SWITCH')
@@ -1859,7 +1896,8 @@ def showResult():
                 SELECT er.Score, er.TotalQuestions, er.CorrectAnswers,
                        er.SubmissionTime, er.Status, er.SessionID,
                        es.StartTime, es.EndTime,
-                       (SELECT COUNT(*) FROM violations v WHERE v.SessionID = er.SessionID) AS warnings_count
+                       (SELECT COUNT(*) FROM violations v WHERE v.SessionID = er.SessionID) AS warnings_count,
+                       er.Attempts, er.FailureReasons
                 FROM exam_results er
                 JOIN exam_sessions es ON es.SessionID = er.SessionID
                 WHERE er.StudentID = %s
@@ -1950,6 +1988,9 @@ def showResult():
 
                 total_violations = max(len(violations), warnings_issued if db_status == 'TERMINATED' else len(violations))
 
+                attempts_count = int(row[9]) if len(row) > 9 and row[9] is not None else 1
+                failure_reason = row[10] if len(row) > 10 else ""
+
                 result_data = {
                     'percentage':        percentage,
                     'score':             (row[2] or 0) * 2,  # CorrectAnswers * 2
@@ -1960,12 +2001,14 @@ def showResult():
                     'warnings_issued':   warnings_issued,
                     'auto_terminated':   (db_status == 'TERMINATED'),
                     'status':            db_status,
-                    'reason':            request.args.get('reason') or ('Maximum warnings reached' if db_status == 'TERMINATED' else ''),
+                    'reason':            failure_reason or request.args.get('reason') or ('Maximum warnings reached' if db_status == 'TERMINATED' else ''),
                     'submission_time':   row[3] or row[7],
                     'exam_title':        'Final Examination',
                     'violations':        violations,
                     'violations_breakdown': violations_breakdown,
-                    'total_violations':  total_violations
+                    'total_violations':  total_violations,
+                    'attempts':          attempts_count,
+                    'max_attempts':      5
                 }
         except Exception as e:
             logger.error(f"Error fetching student result: {e}", exc_info=True)
@@ -1997,40 +2040,69 @@ def showResult():
 @app.route('/adminResultDetails/<int:resultId>')
 @require_role('ADMIN')
 def adminResultDetails(resultId):
-    """Show detailed result for a student - resultId is StudentID"""
-    result_data = None
-    violations = []
+    """Show detailed attempt history for a student - resultId is StudentID"""
     try:
         ensure_db_schema()
         cur = mysql.connection.cursor()
+        
+        # 1. Fetch student info
+        cur.execute("SELECT ID, Name, Email, Profile FROM students WHERE ID = %s", (resultId,))
+        student_info = cur.fetchone()
+        if not student_info:
+            flash("Student not found.", "warning")
+            return redirect(url_for('adminResults'))
+            
+        student_dict = {
+            'student_id': student_info[0],
+            'student_name': student_info[1],
+            'student_email': student_info[2],
+            'student_profile': student_info[3],
+        }
+
+        # 2. Fetch all attempts (exam_results)
         cur.execute("""
-            SELECT er.ResultID, er.StudentID, s.Name, s.Email, s.Profile,
-                   er.Score, er.TotalQuestions, er.CorrectAnswers,
-                   er.SubmissionTime, er.Status, er.SessionID, es.StartTime, es.EndTime
+            SELECT er.ResultID, er.Score, er.TotalQuestions, er.CorrectAnswers,
+                   er.SubmissionTime, er.Status, er.SessionID,
+                   es.StartTime, es.EndTime, er.Attempts, er.FailureReasons
             FROM exam_results er
-            JOIN students s ON s.ID = er.StudentID
             JOIN exam_sessions es ON es.SessionID = er.SessionID
             WHERE er.StudentID = %s
-            ORDER BY er.SubmissionTime DESC LIMIT 1
+            ORDER BY er.Attempts DESC
         """, (resultId,))
-        row = cur.fetchone()
+        attempts_rows = cur.fetchall()
         
-        if row:
-            total_q = int(row[6] or 0)
-            correct_q = int(row[7] or 0)
-            if total_q > 0:
-                percentage = round((correct_q / total_q) * 100.0, 2)
-            else:
-                percentage = float(row[5]) if row[5] else 0
-            db_status   = row[9]
-            session_id  = row[10]
-            start_time = row[11]
-            end_time = row[8] or row[12]
-            time_spent  = 0
+        attempts = []
+        total_terminated = 0
+        total_passed = 0
+        best_percentage = 0.0
+        total_violations_all = 0
+        
+        for row in attempts_rows:
+            res_id = row[0]
+            total_q = int(row[2] or 0)
+            correct_q = int(row[3] or 0)
+            percentage = round((correct_q / total_q) * 100.0, 2) if total_q > 0 else (float(row[1]) if row[1] else 0.0)
+            db_status = row[5]
+            session_id = row[6]
+            start_time = row[7]
+            end_time = row[4] or row[8]
+            
+            attempt_num = row[9] if row[9] is not None else 1
+            failure_reasons = row[10] if len(row) > 10 and row[10] else ""
+            
+            if db_status == 'TERMINATED':
+                total_terminated += 1
+            elif db_status == 'PASS':
+                total_passed += 1
+            if percentage > best_percentage:
+                best_percentage = percentage
+
+            time_spent = 0
             if start_time and end_time:
                 try:
                     time_spent = max(0, int((end_time - start_time).total_seconds()))
                 except: pass
+                
             if percentage >= 90:   grade = 'A'
             elif percentage >= 75: grade = 'B'
             elif percentage >= 60: grade = 'C'
@@ -2047,9 +2119,11 @@ def adminResultDetails(resultId):
             for r in vrows:
                 vtype = _friendly_violation_type(r[0])
                 violations.append({'type': vtype, 'details': r[1], 'time': str(r[2])})
-            if not violations and warning_system and row[1]:
+                
+            if not violations and warning_system:
+                # Provide fallback for latest attempt maybe
                 try:
-                    fallback = warning_system.get_violations(str(row[1])) or []
+                    fallback = warning_system.get_violations(str(resultId)) or []
                     for v in fallback:
                         vtype = _friendly_violation_type(v.get('type'))
                         violations.append({
@@ -2057,40 +2131,52 @@ def adminResultDetails(resultId):
                             'details': v.get('details'),
                             'time': str(v.get('time') or '')
                         })
-                except Exception as v_fallback_err:
-                    logger.warning(f"Violations fallback warning: {v_fallback_err}")
-            warnings_live = 0
-            if warning_system and row[1]:
-                try:
-                    warnings_live = int(warning_system.get_warnings(str(row[1])) or 0)
                 except Exception:
-                    warnings_live = 0
+                    pass
+                    
+            warnings_live = 0
+            if warning_system:
+                try:
+                    warnings_live = int(warning_system.get_warnings(str(resultId)) or 0)
+                except Exception: pass
+                
             warnings_issued = max(len(violations), warnings_live)
             if db_status == 'TERMINATED' and warnings_issued < 3:
                 warnings_issued = 3
+                
+            total_violations_all += len(violations)
             
-            result_data = {
-                'id': row[0], 'student_id': row[1],
-                'student_name': row[2], 'student_email': row[3], 'student_profile': row[4],
-                'exam_title': 'Final Examination',
-                'score': (row[7] or 0) * 2,
-                'total_questions': row[6] or 125,
-                'percentage': percentage, 'grade': grade,
+            attempts.append({
+                'attempt_num': attempt_num,
+                'score': (row[3] or 0) * 2,
+                'total_questions': row[2] or 125,
+                'percentage': percentage,
+                'grade': grade,
                 'time_spent': time_spent,
                 'warnings_issued': warnings_issued,
                 'auto_terminated': (db_status == 'TERMINATED'),
-                'submission_time': row[8],
-            }
-            result_data['violations_missing'] = (result_data['auto_terminated'] and len(violations) == 0)
+                'status': db_status,
+                'submission_time': row[4],
+                'failure_reasons': failure_reasons,
+                'violations': violations
+            })
+
         cur.close()
+        
+        # Summary stats
+        summary = {
+            'total_attempts': len(attempts),
+            'total_terminated': total_terminated,
+            'total_passed': total_passed,
+            'best_percentage': best_percentage,
+            'total_violations': total_violations_all
+        }
+        
+        return render_template('ResultDetails.html', student=student_dict, attempts=attempts, summary=summary)
     except Exception as e:
         logger.error(f"Error fetching result details: {e}", exc_info=True)
         flash(f"Error loading result details: {e}", "danger")
-    
-    if not result_data:
-        flash("Result not found.", "warning")
         return redirect(url_for('adminResults'))
-    return render_template('ResultDetails.html', result=result_data, violations=violations)
 
 @app.route('/adminResults')
 @require_role('ADMIN')

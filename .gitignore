@@ -38,6 +38,7 @@ static/audio_recordings/
 static/face_encodings/
 static/profiles/
 static/Profiles/
+static/recording/
 
 # YOLO model weights (too large for git)
 *.pt

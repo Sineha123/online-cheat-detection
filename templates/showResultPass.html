@@ -451,6 +451,18 @@
                     </div>
                     
                     <div class="detail-card">
+                        <i class="fas fa-redo-alt detail-icon" style="color: #f59e0b;"></i>
+                        <div class="detail-label">Attempt</div>
+                        <div class="detail-value">
+                            {% if result %}
+                                {{ result.attempts }}/{{ result.max_attempts }}
+                            {% else %}
+                                1/5
+                            {% endif %}
+                        </div>
+                    </div>
+                    
+                    <div class="detail-card">
                         <i class="fas fa-chart-line detail-icon"></i>
                         <div class="detail-label">Score</div>
                         <div class="detail-value">
@@ -569,12 +581,29 @@
                 </div>
 
                 {% if result and result.auto_terminated %}
-                <div style="background: #fff3e0; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; width: 100%;">
+                <div style="background: #fff3e0; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; width: 100%; border-left: 5px solid #ef6c00;">
                     <i class="fas fa-exclamation-triangle" style="color: #ef6c00; font-size: 24px; margin-bottom: 10px;"></i>
                     <h4 style="color: #ef6c00; margin-bottom: 10px;">Exam Terminated</h4>
                     <p style="color: #666; margin: 0;">
-                        Your exam was automatically terminated due to multiple violations. 
-                        Please contact your instructor for more information.
+                        Your exam was automatically terminated due to multiple violations.
+                    </p>
+                </div>
+                {% endif %}
+
+                {% if result and result.attempts >= 5 %}
+                <div style="background: #fee2e2; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; width: 100%; border-left: 5px solid #dc2626;">
+                    <i class="fas fa-ban" style="color: #dc2626; font-size: 24px; margin-bottom: 10px;"></i>
+                    <h4 style="color: #dc2626; margin-bottom: 10px;">Permanent Dismissal</h4>
+                    <p style="color: #666; margin: 0;">
+                        You have used all 5 exam attempts. You are permanently dismissed and cannot retake this exam.
+                    </p>
+                </div>
+                {% elif result and result.attempts >= 3 %}
+                <div style="background: #fef3c7; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; width: 100%; border-left: 5px solid #d97706;">
+                    <i class="fas fa-exclamation-circle" style="color: #d97706; font-size: 24px; margin-bottom: 10px;"></i>
+                    <h4 style="color: #d97706; margin-bottom: 10px;">Attempt Warning</h4>
+                    <p style="color: #666; margin: 0;">
+                        Warning: You have used {{ result.attempts }} of 5 allowed attempts. Only {{ result.max_attempts - result.attempts }} attempt(s) remaining.
                     </p>
                 </div>
                 {% endif %}
@@ -583,9 +612,11 @@
                     <a href="{{ url_for('logout') }}" class="btn btn-primary">
                         <i class="fas fa-sign-out-alt"></i> Logout
                     </a>
+                    {% if result and result.attempts < 5 %}
                     <a href="{{ url_for('rules') }}" class="btn btn-secondary">
-                        <i class="fas fa-home"></i> Back to Home
+                        <i class="fas fa-redo"></i> Retake Exam
                     </a>
+                    {% endif %}
                 </div>
             </div>
         </div>
