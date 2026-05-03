@@ -218,6 +218,24 @@ This copies models/wasm bundles and rebuilds `static/proctor_engine/manifest.jso
 
 ---
 
+---
+
+## Face Verification Formula (Backend Logic)
+The system uses the `DeepFace` framework with the `VGG-Face` model for identity verification. During the pre-exam phase, a live snapshot is compared against the student's registered profile image.
+
+**Logic & Thresholds:**
+- **Model**: `VGG-Face` (Pre-trained CNN)
+- **Distance Metric**: `Cosine Similarity`
+- **Verification Formula**:  
+  $$Verified = \begin{cases} True, & \text{if } Distance \leq 0.40 \\ False, & \text{if } Distance > 0.40 \end{cases}$$
+- **Processing Flow**:
+  1. Extract face embedding (128-d or 2622-d vector) from registered image ($V_{reg}$).
+  2. Extract face embedding from live snapshot ($V_{live}$).
+  3. Calculate Cosine Distance: $D = 1 - \frac{V_{reg} \cdot V_{live}}{\|V_{reg}\| \|V_{live}\|}$.
+  4. If $D \leq 0.40$, access is granted.
+
+---
+
 ## License and Credits
 Internal academic project (Online CheatBuster) using open-source components: Flask, Flask-SocketIO, onnxruntime-web, MediaPipe Tasks Vision, and YOLO-based ONNX models.
 

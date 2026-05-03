@@ -910,6 +910,28 @@ def _maybe_issue_object_warning(student_id, student_name, label):
             socketio.emit('student_violation', violation_payload, namespace='/student', to=target)
             socketio.emit('student_violation', violation_payload, namespace='/admin')
 
+def _maybe_issue_behavioral_warning(student_id, student_name, vtype, details):
+    """Server-side behavioral warning + student notification."""
+    sid = str(student_id)
+    if not sid: return
+    now = time.time()
+    key = f"{sid}:{vtype}"
+    # Small throttle to avoid repeated warnings on every frame
+    last = float(_last_object_alert_at.get(key, 0.0))
+    if now - last < 4.0:
+        return
+    _last_object_alert_at[key] = now
+
+    if warning_system:
+        if sid not in warning_system.warnings:
+            warning_system.initialize_student(sid, student_name or f"Student {sid}")
+        pre = warning_system.get_warnings(sid)
+        warning_system.add_warning(sid, vtype, details, emit_to_student=True)
+        post = warning_system.get_warnings(sid)
+        if post > pre:
+             _record_runtime_warning(sid, student_name, vtype, details)
+
+
 def _reset_exam_runtime_state(student_id, started_at_ms=None, student_name=None):
     sid = str(student_id)
     with runtime_warning_state_lock:
@@ -1603,7 +1625,7 @@ def proctorManifest():
 
 @app.route('/api/pre-exam-face-verify', methods=['POST'])
 @require_role('STUDENT')
-@rate_limit('pre_exam_face_verify', max_requests=20, window_seconds=120)
+@rate_limit('pre_exam_face_verify', max_requests=200, window_seconds=60)
 def preExamFaceVerify():
     """Verify live captured face using the new AI Vision Engine before exam starts."""
     user = current_user()
@@ -1653,8 +1675,10 @@ def preExamFaceVerify():
                 img1_path=frame, 
                 img2_path=profile_path, 
                 model_name="Facenet", 
+                detector_backend="mediapipe",
                 enforce_detection=True
             )
+
             
             if result.get("verified"):
                 session['face_verified_for_exam'] = True
@@ -2045,6 +2069,7 @@ def showResult():
                 result_data = {
                     'percentage':        percentage,
                     'score':             (row[2] or 0) * 2,  # CorrectAnswers * 2
+
                     'correct_answers':   int(row[2] or 0),
                     'total_questions':   row[1] or 125,
                     'grade':             grade,
@@ -2942,7 +2967,8 @@ def api_detect_eyes():
             return jsonify({'error': 'decode_failed'}), 400
         cascade_path = os.path.join('Haarcascades', 'haarcascade_eye.xml')
         if not os.path.exists(cascade_path):
-            return jsonify({'error': 'cascade_missing'}), 500
+            logger.warning(f"Haarcascade eye file missing at {cascade_path}. Returning empty detections.")
+            return jsonify({'eye_pairs': 0, 'bboxes': [], 'warning': 'cascade_missing'})
         eye_cascade = _cv2.CascadeClassifier(cascade_path)
         detections = eye_cascade.detectMultiScale(img, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
         bboxes = [[int(x), int(y), int(w), int(h)] for (x, y, w, h) in detections]
@@ -2994,10 +3020,11 @@ def api_detect_book():
             solidity = area / max(hull_area, 1e-3)
             if solidity < 0.65:
                 continue
-            if cy < h * 0.4:
-                continue  # only consider bottom 60% (desk area)
+            if cy < h * 0.2:
+                continue  # only consider bottom 80% (mostly desk and chest area)
             detected = True
             break
+
         return jsonify({'book_detected': detected})
     except Exception as e:
         logger.warning(f"/api/detect-book failed: {e}")
@@ -3840,8 +3867,19 @@ if MONITORING_ENABLED and socketio:
         if not student_id:
             return
         _last_v2_telemetry_at[student_id] = time.time()
-        score = data.get('analysis', {}).get('suspicion_score', 0)
+        
+        analysis = data.get('analysis', {})
         metrics = data.get('metrics', {})
+        
+        # Normalize active_flags from client (handle both list and dict)
+        raw_flags = analysis.get('active_flags', [])
+        active_flags = []
+        if isinstance(raw_flags, dict):
+            for k, v in raw_flags.items():
+                if v: active_flags.append(k.upper())
+        elif isinstance(raw_flags, list):
+            active_flags = [str(f).upper() for f in raw_flags]
+
         # Normalize & filter labels to only the objects we care about.
         raw_labels = [str(l).lower() for l in (metrics.get('banned_labels') or [])]
         allowed_labels = {
@@ -3862,8 +3900,17 @@ if MONITORING_ENABLED and socketio:
                 normalized.append('book')
             elif label == 'paper':
                 normalized.append('paper')
+        
+        # Inject accessory detections into normalized labels for admin UI
+        acc = metrics.get('accessory', {})
+        if acc.get('headphone_detected') and 'headphone' not in normalized:
+            normalized.append('headphone')
+        if acc.get('earphone_detected') and 'earphone' not in normalized:
+            normalized.append('earphone')
+
         metrics['banned_labels'] = list(dict.fromkeys(normalized))
         data['metrics'] = metrics
+
     
         runtime_state = _get_runtime_warning_state(student_id)
         student_name = runtime_state.get('student_name') or f"Student {student_id}"
@@ -3880,19 +3927,52 @@ if MONITORING_ENABLED and socketio:
         if start_time:
             data['start_time'] = int(start_time)
     
+        # ─── BEHAVIORAL & OBJECT WARNINGS ───
         # If server sees book/paper in telemetry, issue a server warning immediately
         if 'book' in metrics.get('banned_labels', []) or 'paper' in metrics.get('banned_labels', []):
             label = 'book' if 'book' in metrics.get('banned_labels', []) else 'paper'
             _maybe_issue_object_warning(student_id, student_name, label)
+
+        # 1. Face Presence
+        if 'NO_FACE' in active_flags or metrics.get('face_count') == 0:
+            _maybe_issue_behavioral_warning(student_id, student_name, 'NO_FACE', "No face detected in frame")
+        elif 'MULTIPLE_FACES' in active_flags or metrics.get('face_count', 0) > 1:
+            _maybe_issue_behavioral_warning(student_id, student_name, 'MULTIPLE_FACES', f"Multiple faces detected ({metrics.get('face_count')} persons)")
+
+        # 2. Eye Gaze (Up/Down/Left/Right)
+        if 'GAZE_UP' in active_flags:
+            _maybe_issue_behavioral_warning(student_id, student_name, 'GAZE_UP', "Looking UP detected")
+        elif 'GAZE_DOWN' in active_flags:
+            _maybe_issue_behavioral_warning(student_id, student_name, 'GAZE_DOWN', "Looking DOWN detected")
+        elif 'LOOKING_AWAY' in active_flags:
+            _maybe_issue_behavioral_warning(student_id, student_name, 'DISTRACTION', "Looking away from screen")
+
+        # 3. Head Pose (Up/Down)
+        pitch = metrics.get('pitch_deg', 0)
+        if pitch > 35: # Looking Down (High threshold for "Too Down")
+            _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_DOWN', "Head tilted too far DOWN")
+        elif pitch < -35: # Looking Up
+            _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_UP', "Head tilted too far UP")
+
+
+
+        # 4. Accessories
+        if acc.get('headphone_detected'):
+            _maybe_issue_behavioral_warning(student_id, student_name, 'PROHIBITED_OBJECT', "Headphones detected")
+        elif acc.get('earphone_detected'):
+            _maybe_issue_behavioral_warning(student_id, student_name, 'PROHIBITED_OBJECT', "Earphones detected")
+        elif acc.get('wire_detected'):
+            _maybe_issue_behavioral_warning(student_id, student_name, 'PROHIBITED_OBJECT', "Prohibited wire pattern detected")
+
     
         # Ensure student appears in admin polling
         with active_exam_students_lock:
             active_exam_students.add(student_id)
+
     
         # Inject server-side voice_detected flag into active_flags
-        analysis = data.get('analysis', {})
-        active_flags = analysis.get('active_flags', [])
         voice_info = _student_voice_activity.get(student_id, {"active": False, "rms": 0})
+
         is_voice = voice_info.get("active", False)
         voice_rms = voice_info.get("rms", 0)
         

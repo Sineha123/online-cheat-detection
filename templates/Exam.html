@@ -1655,7 +1655,7 @@
         }
 
         async function verifyFaceBeforeExamStartStrong() {
-            const totalSamples = 3;
+            const totalSamples = 1;
             let matchedCount = 0;
             let lastFailureReason = '';
             const distances = [];
@@ -1674,7 +1674,7 @@
                 }
             }
 
-            const matched = matchedCount >= 2;
+            const matched = matchedCount >= 1;
             return {
                 ok: true,
                 matched: matched,

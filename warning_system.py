@@ -50,7 +50,9 @@ class WarningSystem:
             'NO_FACE':              1.5,   # detect quickly
             'DISTRACTION':          1.5,   # gaze/head away — needs repetition
             'HEAD_MOVEMENT':        1.0,
-            'HEAD_DOWN':            5.0,
+            'HEAD_DOWN':            3.0,
+            'HEAD_UP':              3.0,
+
             'STUDENT_LEFT_SEAT':    4.0,
             'EYES_CLOSED':          6.0,
             'GAZE_LEFT':            1.0,
@@ -112,6 +114,10 @@ class WarningSystem:
             if (now - last_global) < g_gap or (now - last_type) < t_gap:
                 return False
             
+            # STOP adding any more warnings if already at or above limit
+            if self.warnings[sid] >= self.max_warnings:
+                return False
+
             # Increment warning count. If auto-terminate is true, cap at max_warnings so it doesn't inflate.
             if self.auto_terminate:
                 if self.warnings[sid] < self.max_warnings:
@@ -129,6 +135,7 @@ class WarningSystem:
                 'details': details
             }
             self.violations[sid].append(violation)
+
             self._persist_violation(sid, violation)
             
             count = self.warnings[sid]
