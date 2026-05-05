@@ -450,6 +450,7 @@
                         </div>
                     </div>
                     
+                    <!-- Attempt feature disabled
                     <div class="detail-card">
                         <i class="fas fa-redo-alt detail-icon" style="color: #f59e0b;"></i>
                         <div class="detail-label">Attempt</div>
@@ -461,6 +462,7 @@
                             {% endif %}
                         </div>
                     </div>
+                    -->
                     
                     <div class="detail-card">
                         <i class="fas fa-chart-line detail-icon"></i>
@@ -590,6 +592,7 @@
                 </div>
                 {% endif %}
 
+                <!-- Attempt limit warnings disabled
                 {% if result and result.attempts >= 5 %}
                 <div style="background: #fee2e2; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; width: 100%; border-left: 5px solid #dc2626;">
                     <i class="fas fa-ban" style="color: #dc2626; font-size: 24px; margin-bottom: 10px;"></i>
@@ -607,12 +610,14 @@
                     </p>
                 </div>
                 {% endif %}
+                -->
                 
                 <div class="actions">
                     <a href="{{ url_for('logout') }}" class="btn btn-primary">
                         <i class="fas fa-sign-out-alt"></i> Logout
                     </a>
-                    {% if result and result.attempts < 5 %}
+                    {# Attempt limit check disabled #}
+                    {% if True or (result and result.attempts < 5) %}
                     <a href="{{ url_for('rules') }}" class="btn btn-secondary">
                         <i class="fas fa-redo"></i> Retake Exam
                     </a>

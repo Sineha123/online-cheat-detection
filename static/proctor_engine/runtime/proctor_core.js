@@ -118,10 +118,10 @@ const LIGHTING_EMA_ALPHA = 0.28;
 const CLASS_CONF_THRESHOLDS = {
   person: 0.5,
   "cell phone": 0.40, // Increased to 40% to prevent false alarms from hands/background objects
-  // Book/notebook/journal/register: aggressively low confidence to catch tilted or back-side books
-  "book": 0.05,
+  // Book/notebook/journal/register: increased to reduce false positives
+  "book": 0.35,
   "clock": 0.2,
-  "paper": 0.05
+  "paper": 0.35
 };
 const MIN_AREA_RATIO_BY_LABEL = {
   person: 0.01,
@@ -141,7 +141,7 @@ const MIN_SHORT_SIDE_PX_BY_LABEL = {
 const ACCESSORY_SCORE_THRESHOLDS = {
   wire: 0.12,
   earphone: 0.35,
-  headphone: 0.65
+  headphone: 0.90
 };
 let wasmReady = false;
 let ProctorEngineCtor = null;
@@ -1173,7 +1173,7 @@ class ProctorCore {
       risk += 10;
       reasons.push("Head yaw off-axis");
     }
-    if (Math.abs(pitch) > 20) {
+    if (Math.abs(pitch) > 35) {
       risk += 9;
       reasons.push("Head pitch off-axis");
     }

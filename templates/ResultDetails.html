@@ -183,7 +183,7 @@
 
         <main>
             <div class="head-title">
-                <h1>Student Attempt History</h1>
+                <h1>Student Exam History</h1>
                 <ul class="breadcrumb">
                     <li><a href="{{ url_for('adminResults') }}">Results</a></li>
                     <li><i class='bx bx-chevron-right'></i></li>
@@ -212,11 +212,13 @@
             <!-- Overall Stats Summary -->
             <h3 style="margin-bottom:20px; font-weight:700; color:var(--gray-900);">Overall Statistics Summary</h3>
             <div class="stats-grid">
+                <!-- Attempt feature disabled
                 <div class="stat-card">
                     <div class="stat-icon">🔄</div>
                     <div class="stat-value">{{ summary.total_attempts }}</div>
                     <div class="stat-label">Total Attempts Taken</div>
                 </div>
+                -->
                 <div class="stat-card">
                     <div class="stat-icon">⚠️</div>
                     <div class="stat-value" style="color:#ef4444;">{{ summary.total_terminated }}</div>
@@ -240,14 +242,14 @@
             </div>
 
             <!-- Per-Attempt Accordion Cards -->
-            <h3 style="margin-bottom:20px; font-weight:700; color:var(--gray-900);">Attempt History Audit Trail</h3>
+            <h3 style="margin-bottom:20px; font-weight:700; color:var(--gray-900);">Exam History Audit Trail</h3>
             
             {% if attempts %}
                 {% for attempt in attempts %}
                 <div class="accordion-card">
                     <div class="accordion-header" onclick="toggleAccordion('attempt-{{ attempt.attempt_num }}')">
                         <div style="display:flex; align-items:center; gap:15px;">
-                            <span style="font-size:18px;">Attempt {{ attempt.attempt_num }}</span>
+                            <span style="font-size:18px;">Exam Session {{ attempt.attempt_num }}</span>
                             {% if attempt.status == 'PASS' %}
                                 <span class="badge-pass" style="padding:4px 10px; font-size:11px;">PASS</span>
                             {% elif attempt.status == 'TERMINATED' %}
@@ -273,7 +275,7 @@
                             {% endif %}
                         </div>
 
-                        <h5 style="margin-bottom:15px; font-weight:600;"><i class='bx bxs-error-circle' style="color:#ef4444;margin-right:8px;"></i>Violations for this Attempt</h5>
+                        <h5 style="margin-bottom:15px; font-weight:600;"><i class='bx bxs-error-circle' style="color:#ef4444;margin-right:8px;"></i>Violations for this Session</h5>
                         {% if attempt.violations %}
                         <div class="table-responsive">
                             <table>
@@ -303,7 +305,7 @@
                         </div>
                         {% else %}
                         <div style="padding:20px; text-align:center; color:#888; background:var(--gray-50); border-radius:8px;">
-                            No violations recorded for this attempt.
+                            No violations recorded for this session.
                         </div>
                         {% endif %}
                     </div>
@@ -311,7 +313,7 @@
                 {% endfor %}
             {% else %}
                 <div style="padding:40px; text-align:center; color:#888; background:var(--light); border-radius:12px; box-shadow:var(--shadow-sm);">
-                    No exam attempts found for this student.
+                    No exam sessions found for this student.
                 </div>
             {% endif %}
 

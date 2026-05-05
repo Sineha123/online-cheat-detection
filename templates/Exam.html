@@ -2270,8 +2270,8 @@
             // ── END HEAD DOWN ──
             syncTimer: null,
             lastServerViolationSignature: '',
-            globalWarningGapMs: 900,
-            postAcknowledgeGraceMs: 1800,
+            globalWarningGapMs: 1500,
+            postAcknowledgeGraceMs: 3000,
             duplicateKeyWindowMs: 4000,
             typeCooldownsMs: {
                 'VOICE_DETECTED': 5000,
@@ -3403,7 +3403,7 @@
                         } else {
                             warningSystem.noFaceFrames = 0;
                         }
-                        if (warningSystem.noFaceFrames > 14) {
+                        if (warningSystem.noFaceFrames > 50) {
                             if (!flagsArr.includes('NO_FACE')) flagsArr.push('NO_FACE');
                         }
 

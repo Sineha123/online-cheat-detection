@@ -18,6 +18,21 @@ import traceback
 import logging
 import hashlib
 try:
+    from deepface import DeepFace
+    DEEPFACE_AVAILABLE = True
+    # Warm up DeepFace by building the model once
+    # This will ensure the model is loaded into memory at startup
+    # DeepFace.build_model("Facenet") 
+except Exception:
+    DEEPFACE_AVAILABLE = False
+
+_profile_embeddings_cache = {}
+try:
+    from scipy.spatial.distance import cosine as _cosine_dist
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
+try:
     import eventlet
     eventlet.monkey_patch()
     EVENTLET_AVAILABLE = True
@@ -916,9 +931,11 @@ def _maybe_issue_behavioral_warning(student_id, student_name, vtype, details):
     if not sid: return
     now = time.time()
     key = f"{sid}:{vtype}"
-    # Small throttle to avoid repeated warnings on every frame
+    # Throttle between consecutive warnings of the same type
+    # Increased to 3.0 to prevent 'false' spam while remaining responsive
+    throttle = 3.0 if vtype == 'NO_FACE' else 4.0
     last = float(_last_object_alert_at.get(key, 0.0))
-    if now - last < 4.0:
+    if now - last < throttle:
         return
     _last_object_alert_at[key] = now
 
@@ -1042,17 +1059,18 @@ def login():
             except Exception:
                 mysql.connection.rollback()
 
-        if role == 'STUDENT':
-            try:
-                cur.execute("SELECT MAX(Attempts) FROM exam_results WHERE StudentID=%s", (student_id,))
-                row = cur.fetchone()
-                max_attempts = int(row[0]) if row and row[0] is not None else 0
-                if max_attempts >= 5:
-                    cur.close()
-                    flash('You have used all 5 exam attempts. You are permanently dismissed and cannot retake this exam.', 'login_error')
-                    return redirect(url_for('main'))
-            except Exception as e:
-                logger.error(f"Error checking attempts limit during login: {e}")
+        # Attempt limit feature disabled
+        # if role == 'STUDENT':
+        #     try:
+        #         cur.execute("SELECT MAX(Attempts) FROM exam_results WHERE StudentID=%s", (student_id,))
+        #         row = cur.fetchone()
+        #         max_attempts = int(row[0]) if row and row[0] is not None else 0
+        #         if max_attempts >= 5:
+        #             cur.close()
+        #             flash('You have used all 5 exam attempts. You are permanently dismissed and cannot retake this exam.', 'login_error')
+        #             return redirect(url_for('main'))
+        #     except Exception as e:
+        #         logger.error(f"Error checking attempts limit during login: {e}")
 
         session.permanent = True
         user_data = {
@@ -1461,18 +1479,18 @@ def exam():
     student_id = user['Id']
     student_name = user['Name']
     
-    # Enforce 5-attempt limit
-    try:
-        cur = mysql.connection.cursor()
-        cur.execute("SELECT MAX(Attempts) FROM exam_results WHERE StudentID=%s", (student_id,))
-        row = cur.fetchone()
-        cur.close()
-        max_attempts = int(row[0]) if row and row[0] is not None else 0
-        if max_attempts >= 5:
-            flash('You have used all 5 exam attempts. You are permanently dismissed and cannot retake this exam.', 'error')
-            return redirect(url_for('showResultFail', reason='Maximum attempts reached.'))
-    except Exception as db_err:
-        logger.error(f"Error checking attempts limit: {db_err}")
+    # Attempt limit feature disabled
+    # try:
+    #     cur = mysql.connection.cursor()
+    #     cur.execute("SELECT MAX(Attempts) FROM exam_results WHERE StudentID=%s", (student_id,))
+    #     row = cur.fetchone()
+    #     cur.close()
+    #     max_attempts = int(row[0]) if row and row[0] is not None else 0
+    #     if max_attempts >= 5:
+    #         flash('You have used all 5 exam attempts. You are permanently dismissed and cannot retake this exam.', 'error')
+    #         return redirect(url_for('showResultFail', reason='Maximum attempts reached.'))
+    # except Exception as db_err:
+    #     logger.error(f"Error checking attempts limit: {db_err}")
     
     print(f"🎯 Exam page ready for {student_name} (ID: {student_id})")
     # Strict gate: student must complete pre-exam face verification before exam session can start.
@@ -1657,9 +1675,11 @@ def preExamFaceVerify():
         if not os.path.exists(profile_path):
             return jsonify({'ok': False, 'matched': False, 'error': 'Profile image file missing on server'}), 400
             
+        if not DEEPFACE_AVAILABLE:
+            return jsonify({'ok': False, 'matched': False, 'error': 'Face verification service unavailable'}), 500
+            
         import cv2 as _cv2
         import numpy as _np
-        from deepface import DeepFace
         
         image_b64 = image_data.split(',', 1)[1] if ',' in image_data else image_data
         img_bytes = base64.b64decode(image_b64)
@@ -1669,39 +1689,74 @@ def preExamFaceVerify():
         if frame is None:
             return jsonify({'ok': False, 'matched': False, 'error': 'Invalid image format'}), 400
             
-        # Verify face against profile
+        # Optimization: Use cached profile embeddings and manual distance calculation
+        # This avoids re-processing the profile image every single time.
         try:
-            result = DeepFace.verify(
-                img1_path=frame, 
-                img2_path=profile_path, 
+            # 1. Get live frame embedding
+            objs = DeepFace.represent(
+                img_path=frame, 
                 model_name="Facenet", 
-                detector_backend="mediapipe",
+                detector_backend="opencv",
                 enforce_detection=True
             )
-
             
-            if result.get("verified"):
+            if not objs:
+                return jsonify({'ok': False, 'matched': False, 'error': 'No face detected in webcam. Please align your face.'}), 200
+            
+            live_embedding = objs[0]["embedding"]
+            
+            # 2. Get/Cache profile embedding
+            profile_embedding = _profile_embeddings_cache.get(profile_path)
+            if not profile_embedding:
+                logger.info(f"Generating new profile embedding for: {profile_path}")
+                p_objs = DeepFace.represent(
+                    img_path=profile_path, 
+                    model_name="Facenet", 
+                    detector_backend="opencv",
+                    enforce_detection=True
+                )
+                if p_objs:
+                    profile_embedding = p_objs[0]["embedding"]
+                    _profile_embeddings_cache[profile_path] = profile_embedding
+            
+            if not profile_embedding:
+                return jsonify({'ok': False, 'matched': False, 'error': 'Could not process profile image'}), 500
+
+            # 3. Calculate distance
+            distance = 1.0 # default
+            if SCIPY_AVAILABLE:
+                distance = _cosine_dist(live_embedding, profile_embedding)
+            else:
+                # fallback manual cosine similarity
+                a = _np.array(live_embedding)
+                b = _np.array(profile_embedding)
+                distance = 1.0 - (_np.dot(a, b) / (_np.linalg.norm(a) * _np.linalg.norm(b)))
+
+            verified = distance <= 0.40 # Standard FaceNet cosine threshold
+            
+            if verified:
                 session['face_verified_for_exam'] = True
                 session['student_face_verified_at'] = time.time()
                 return jsonify({
                     'ok': True,
                     'matched': True,
-                    'distance': result.get("distance", 0.0)
+                    'distance': float(distance)
                 }), 200
             else:
                 return jsonify({
                     'ok': True,
                     'matched': False,
-                    'distance': result.get("distance", 0.0),
+                    'distance': float(distance),
                     'error': 'Face does not match registered profile. Please ensure proper lighting and alignment.'
                 }), 200
                 
         except ValueError:
-            return jsonify({'ok': False, 'matched': False, 'error': 'No face detected in webcam. Please align your face.'}), 200
+            return jsonify({'ok': False, 'matched': False, 'error': 'No face detected. Please align your face.'}), 200
 
     except Exception as e:
         logger.error(f"preExamFaceVerify error: {e}", exc_info=True)
         return jsonify({'ok': False, 'matched': False, 'error': 'Verification failed'}), 500
+
                          
 @app.route('/exam', methods=['POST'])
 @require_role('STUDENT')
@@ -3005,23 +3060,24 @@ def api_detect_book():
         contours, _ = _cv2.findContours(edges, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
         detected = False
         for cnt in contours:
-            area = _cv2.contourArea(cnt)
-            if area < 3_000:
+            # Relaxed thresholds for better detection
+            if area < 1_500: # Lowered from 3,000
                 continue
             rect = _cv2.minAreaRect(cnt)
             (cx, cy), (rw, rh), _ = rect
             if rh == 0 or rw == 0:
                 continue
             aspect = max(rw, rh) / max(1e-3, min(rw, rh))
-            if aspect < 0.4 or aspect > 3.5:
+            # Relaxed aspect ratio for tilted books
+            if aspect > 5.0: 
                 continue
             hull = _cv2.convexHull(cnt)
             hull_area = _cv2.contourArea(hull)
             solidity = area / max(hull_area, 1e-3)
-            if solidity < 0.65:
+            if solidity < 0.50: # Lowered from 0.65
                 continue
-            if cy < h * 0.2:
-                continue  # only consider bottom 80% (mostly desk and chest area)
+            # if cy < h * 0.1: # Allow more of the upper area
+            #     continue 
             detected = True
             break
 
@@ -3896,7 +3952,7 @@ if MONITORING_ENABLED and socketio:
                 normalized.append('cell phone')
             elif label in ('clock', 'smartwatch'):
                 normalized.append('smartwatch')
-            elif label in ('book', 'book_heuristic', 'notebook', 'textbook', 'copy', 'register', 'journal', 'notepad', 'notes', 'binder', 'folder', 'document', 'magazine'):
+            elif label in ('book', 'book_heuristic', 'book/paper', 'notebook', 'textbook', 'copy', 'register', 'journal', 'notepad', 'notes', 'binder', 'folder', 'document', 'magazine'):
                 normalized.append('book')
             elif label == 'paper':
                 normalized.append('paper')
@@ -3933,25 +3989,25 @@ if MONITORING_ENABLED and socketio:
             label = 'book' if 'book' in metrics.get('banned_labels', []) else 'paper'
             _maybe_issue_object_warning(student_id, student_name, label)
 
-        # 1. Face Presence
-        if 'NO_FACE' in active_flags or metrics.get('face_count') == 0:
-            _maybe_issue_behavioral_warning(student_id, student_name, 'NO_FACE', "No face detected in frame")
+        # 1. Face Presence - now respects client-side 3s delay
+        if 'NO_FACE' in active_flags or metrics.get('face_count', 0) == 0:
+            _maybe_issue_behavioral_warning(student_id, student_name, 'NO_FACE', "No face detected. Please ensure you are visible to the camera.")
         elif 'MULTIPLE_FACES' in active_flags or metrics.get('face_count', 0) > 1:
             _maybe_issue_behavioral_warning(student_id, student_name, 'MULTIPLE_FACES', f"Multiple faces detected ({metrics.get('face_count')} persons)")
 
         # 2. Eye Gaze (Up/Down/Left/Right)
         if 'GAZE_UP' in active_flags:
             _maybe_issue_behavioral_warning(student_id, student_name, 'GAZE_UP', "Looking UP detected")
-        elif 'GAZE_DOWN' in active_flags:
-            _maybe_issue_behavioral_warning(student_id, student_name, 'GAZE_DOWN', "Looking DOWN detected")
+        # elif 'GAZE_DOWN' in active_flags:
+        #     _maybe_issue_behavioral_warning(student_id, student_name, 'GAZE_DOWN', "Looking DOWN detected")
         elif 'LOOKING_AWAY' in active_flags:
             _maybe_issue_behavioral_warning(student_id, student_name, 'DISTRACTION', "Looking away from screen")
 
         # 3. Head Pose (Up/Down)
         pitch = metrics.get('pitch_deg', 0)
-        if pitch > 35: # Looking Down (High threshold for "Too Down")
-            _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_DOWN', "Head tilted too far DOWN")
-        elif pitch < -35: # Looking Up
+        # if pitch > 35: # Looking Down (High threshold for "Too Down")
+        #     _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_DOWN', "Head tilted too far DOWN")
+        if pitch < -35: # Looking Up
             _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_UP', "Head tilted too far UP")
 
 
@@ -3961,8 +4017,8 @@ if MONITORING_ENABLED and socketio:
             _maybe_issue_behavioral_warning(student_id, student_name, 'PROHIBITED_OBJECT', "Headphones detected")
         elif acc.get('earphone_detected'):
             _maybe_issue_behavioral_warning(student_id, student_name, 'PROHIBITED_OBJECT', "Earphones detected")
-        elif acc.get('wire_detected'):
-            _maybe_issue_behavioral_warning(student_id, student_name, 'PROHIBITED_OBJECT', "Prohibited wire pattern detected")
+        # elif acc.get('wire_detected'):
+        #     _maybe_issue_behavioral_warning(student_id, student_name, 'PROHIBITED_OBJECT', "Prohibited wire pattern detected")
 
     
         # Ensure student appears in admin polling
@@ -4011,8 +4067,8 @@ if MONITORING_ENABLED and socketio:
                 'processed_timestamp': now_ts,
                 'detections': prev.get('detections', []),
                 'status_snapshot': {
-                    'warning_count': warnings_count if warning_system else warnings_count,
-                    'suspicion_score': score,
+                    'warning_count': warnings_count,
+                    'suspicion_score': analysis.get('suspicion_score', 0),
                     'faces_detected': metrics.get('face_count', 0),
                     'phone_detected': 'cell phone' in metrics.get('banned_labels', []),
                     'smartwatch_detected': 'smartwatch' in metrics.get('banned_labels', []),
@@ -4025,8 +4081,8 @@ if MONITORING_ENABLED and socketio:
                 'wasm_telemetry': data,  # Store full telemetry for admin
             }
     
-        if score >= 50:
-            logger.info(f"🚨 [WASM TELEMETRY v2] High Suspicion for {student_id}: Score {score}")
+        if analysis.get('suspicion_score', 0) >= 50:
+            logger.info(f"🚨 [WASM TELEMETRY v2] High Suspicion for {student_id}: Score {analysis.get('suspicion_score', 0)}")
     
         # Buffer for batched admin delivery
         with _telemetry_buffer_lock:
