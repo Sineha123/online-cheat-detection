@@ -13,7 +13,7 @@ import threading
 # It natively achieves ~99.63% accuracy on the LFW dataset. Distances between 
 # these embeddings directly correspond to face similarity, making it perfect 
 # and extremely reliable for direct verification tasks without heavy overhead.
-# ==========================================
+# ========================================
 
 MODEL_NAME = "Facenet"
 REFERENCE_IMAGE_PATH = "profile.jpg" # ⚠️ CHANGE THIS to your reference image path!
