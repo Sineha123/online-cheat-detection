@@ -805,14 +805,23 @@ def _record_runtime_warning(student_id, student_name, violation_type, details):
         rec['student_name'] = str(student_name or rec.get('student_name') or 'Unknown')
         if rec['warnings'] < 3:
             rec['warnings'] += 1
-        violation = {
-            'type': str(violation_type or 'UNKNOWN').upper(),
-            'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'details': str(details or '').strip()
-        }
-        rec['violations'].append(violation)
-        count = int(rec['warnings'])
-        return count, violation
+            violation = {
+                'type': str(violation_type or 'UNKNOWN').upper(),
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'details': str(details or '').strip()
+            }
+            rec['violations'].append(violation)
+            count = int(rec['warnings'])
+            return count, violation
+        else:
+            count = 3
+            # Return last violation or dummy
+            dummy = rec['violations'][-1] if rec['violations'] else {
+                'type': str(violation_type or 'UNKNOWN').upper(),
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'details': str(details or '').strip()
+            }
+            return count, dummy
 
 def _get_runtime_warning_state(student_id):
     sid = str(student_id)
@@ -877,29 +886,29 @@ def _maybe_issue_object_warning(student_id, student_name, label):
         post = warning_system.get_warnings(sid)
         if post > pre:
             _record_runtime_warning(sid, student_name, 'PROHIBITED_OBJECT', details)
-        # Push a direct UI warning to student + admin for visibility
-        if socketio:
-            payload = {
-                'student_id': sid,
-                'label': lbl,
-                'details': details,
-                'total_warnings': post
-            }
-            target = target_sid or target_room
-            socketio.emit('server_object_detected', payload, namespace='/student', to=target)
-            socketio.emit('server_object_detected', payload, namespace='/admin')
-            violation_payload = {
-                'student_id': sid,
-                'student_name': student_name,
-                'total_warnings': post,
-                'violation': {'type': 'PROHIBITED_OBJECT', 'details': details},
-                'type': 'PROHIBITED_OBJECT',
-                'details': details,
-                'source': 'server'
-            }
-            target = target_sid or target_room
-            socketio.emit('student_violation', violation_payload, namespace='/student', to=target)
-            socketio.emit('student_violation', violation_payload, namespace='/admin')
+            # Push a direct UI warning to student + admin for visibility
+            if socketio:
+                payload = {
+                    'student_id': sid,
+                    'label': lbl,
+                    'details': details,
+                    'total_warnings': post
+                }
+                target = target_sid or target_room
+                socketio.emit('server_object_detected', payload, namespace='/student', to=target)
+                socketio.emit('server_object_detected', payload, namespace='/admin')
+                violation_payload = {
+                    'student_id': sid,
+                    'student_name': student_name,
+                    'total_warnings': post,
+                    'violation': {'type': 'PROHIBITED_OBJECT', 'details': details},
+                    'type': 'PROHIBITED_OBJECT',
+                    'details': details,
+                    'source': 'server'
+                }
+                target = target_sid or target_room
+                socketio.emit('student_violation', violation_payload, namespace='/student', to=target)
+                socketio.emit('student_violation', violation_payload, namespace='/admin')
     else:
         count, _ = _record_runtime_warning(sid, student_name, 'PROHIBITED_OBJECT', details)
         if socketio:
@@ -1834,7 +1843,8 @@ def examAction():
     runtime_violations = runtime_state.get('violations') or []
     if runtime_violations and len(runtime_violations) > len(violations_list):
         violations_list = runtime_violations
-    warnings_count = max(warnings_count, int(runtime_state.get('warnings') or 0))
+    violations_list = violations_list[:3]
+    warnings_count = min(max(warnings_count, int(runtime_state.get('warnings') or 0)), 3)
     
     # ---- Save to correct DB schema ----
     # Violation type map: frontend/warning_system types -> DB ENUM values
@@ -3022,6 +3032,12 @@ def api_detect_eyes():
             return jsonify({'error': 'decode_failed'}), 400
         cascade_path = os.path.join('Haarcascades', 'haarcascade_eye.xml')
         if not os.path.exists(cascade_path):
+            fallback_dir = getattr(_cv2, 'data', None) and getattr(_cv2.data, 'haarcascades', None)
+            if fallback_dir:
+                fallback_path = os.path.join(fallback_dir, 'haarcascade_eye.xml')
+                if os.path.exists(fallback_path):
+                    cascade_path = fallback_path
+        if not os.path.exists(cascade_path):
             logger.warning(f"Haarcascade eye file missing at {cascade_path}. Returning empty detections.")
             return jsonify({'eye_pairs': 0, 'bboxes': [], 'warning': 'cascade_missing'})
         eye_cascade = _cv2.CascadeClassifier(cascade_path)
@@ -3055,13 +3071,14 @@ def api_detect_book():
             return jsonify({'book_detected': False, 'error': 'decode_failed'}), 400
         h, w = img.shape[:2]
         gray = _cv2.cvtColor(img, _cv2.COLOR_BGR2GRAY)
-        gray = _cv2.GaussianBlur(gray, (15, 15), 0)
+        gray = _cv2.GaussianBlur(gray, (5, 5), 0)
         edges = _cv2.Canny(gray, 40, 120)
         contours, _ = _cv2.findContours(edges, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
         detected = False
         for cnt in contours:
-            # Relaxed thresholds for better detection
-            if area < 1_500: # Lowered from 3,000
+            # Normal, robust thresholds for accurate book/paper detection
+            area = _cv2.contourArea(cnt)
+            if area < 800: # Lowered threshold to detect smaller/distant books
                 continue
             rect = _cv2.minAreaRect(cnt)
             (cx, cy), (rw, rh), _ = rect
@@ -3069,15 +3086,13 @@ def api_detect_book():
                 continue
             aspect = max(rw, rh) / max(1e-3, min(rw, rh))
             # Relaxed aspect ratio for tilted books
-            if aspect > 5.0: 
+            if aspect > 6.0: 
                 continue
             hull = _cv2.convexHull(cnt)
             hull_area = _cv2.contourArea(hull)
             solidity = area / max(hull_area, 1e-3)
-            if solidity < 0.50: # Lowered from 0.65
+            if solidity < 0.35: # Lowered solidity to reliably detect books held by hands
                 continue
-            # if cy < h * 0.1: # Allow more of the upper area
-            #     continue 
             detected = True
             break
 
@@ -3331,6 +3346,31 @@ def api_my_warnings():
     except Exception as e:
         logger.error(f"api_my_warnings error: {e}", exc_info=True)
         return jsonify({'ok': False, 'error': 'Warning state fetch failed'}), 500
+
+@app.route('/api/acknowledge-warning', methods=['POST'])
+@require_role('STUDENT')
+def api_acknowledge_warning():
+    """Triggered by student browser when they click 'I Understand' on a warning.
+    Enforces a strict, guaranteed 3-second quiet gap across the entire system.
+    """
+    user = current_user()
+    if not user:
+        return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+    
+    student_id = str(user['Id'])
+    now = time.time()
+    
+    # 1. Update the warning system global gap and type gap logs
+    if warning_system:
+        warning_system.acknowledge_warning(student_id)
+        
+    # 2. Reset the server-side telemetry warning alert throttles to now (which enforces a new cooldown)
+    for k in list(_last_object_alert_at.keys()):
+        if k.startswith(f"{student_id}:"):
+            _last_object_alert_at[k] = now
+            
+    logger.info(f"✓ Warning acknowledged for student {student_id}. Resetting all server-side alert throttles.")
+    return jsonify({'ok': True})
 
 @app.route('/api/today-violations')
 @require_role('ADMIN')
@@ -3985,30 +4025,24 @@ if MONITORING_ENABLED and socketio:
     
         # ─── BEHAVIORAL & OBJECT WARNINGS ───
         # If server sees book/paper in telemetry, issue a server warning immediately
-        if 'book' in metrics.get('banned_labels', []) or 'paper' in metrics.get('banned_labels', []):
-            label = 'book' if 'book' in metrics.get('banned_labels', []) else 'paper'
+        banned_lower = [str(x).lower() for x in metrics.get('banned_labels', [])]
+        if 'book' in banned_lower or 'paper' in banned_lower or 'book/notebook' in banned_lower:
+            label = 'Book' if 'book' in banned_lower or 'book/notebook' in banned_lower else 'Paper'
             _maybe_issue_object_warning(student_id, student_name, label)
 
         # 1. Face Presence - now respects client-side 3s delay
-        if 'NO_FACE' in active_flags or metrics.get('face_count', 0) == 0:
+        if 'NO_FACE' in active_flags:
             _maybe_issue_behavioral_warning(student_id, student_name, 'NO_FACE', "No face detected. Please ensure you are visible to the camera.")
-        elif 'MULTIPLE_FACES' in active_flags or metrics.get('face_count', 0) > 1:
-            _maybe_issue_behavioral_warning(student_id, student_name, 'MULTIPLE_FACES', f"Multiple faces detected ({metrics.get('face_count')} persons)")
 
         # 2. Eye Gaze (Up/Down/Left/Right)
-        if 'GAZE_UP' in active_flags:
+        if any(f in active_flags for f in ['GAZE_UP', 'GAZE_UP_LEFT', 'GAZE_UP_RIGHT']):
             _maybe_issue_behavioral_warning(student_id, student_name, 'GAZE_UP', "Looking UP detected")
-        # elif 'GAZE_DOWN' in active_flags:
-        #     _maybe_issue_behavioral_warning(student_id, student_name, 'GAZE_DOWN', "Looking DOWN detected")
         elif 'LOOKING_AWAY' in active_flags:
             _maybe_issue_behavioral_warning(student_id, student_name, 'DISTRACTION', "Looking away from screen")
 
         # 3. Head Pose (Up/Down)
-        pitch = metrics.get('pitch_deg', 0)
-        # if pitch > 35: # Looking Down (High threshold for "Too Down")
-        #     _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_DOWN', "Head tilted too far DOWN")
-        if pitch < -35: # Looking Up
-            _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_UP', "Head tilted too far UP")
+        if 'HEAD_POSE' in active_flags:
+            _maybe_issue_behavioral_warning(student_id, student_name, 'HEAD_POSE', "Head turned away from screen")
 
 
 

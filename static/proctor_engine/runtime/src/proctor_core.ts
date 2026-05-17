@@ -184,7 +184,7 @@ const MIN_SHORT_SIDE_PX_BY_LABEL: Record<string, number> = {
 const ACCESSORY_SCORE_THRESHOLDS = {
   wire: 0.12,
   earphone: 0.35,
-  headphone: 0.78
+  headphone: 0.82
 } as const;
 
 let wasmReady = false;
@@ -860,9 +860,9 @@ export class ProctorCore {
     );
 
     const headphoneScoreHeuristic = this.clamp(
-      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 1.05 +
-        headBand.dark_ratio * 0.65 +
-        (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.45,
+      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 0.50 +
+        headBand.dark_ratio * 0.30 +
+        (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.85,
       0,
       1
     );

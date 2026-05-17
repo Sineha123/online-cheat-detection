@@ -119,9 +119,9 @@ const CLASS_CONF_THRESHOLDS = {
   person: 0.5,
   "cell phone": 0.40, // Increased to 40% to prevent false alarms from hands/background objects
   // Book/notebook/journal/register: increased to reduce false positives
-  "book": 0.35,
+  "book": 0.15,
   "clock": 0.2,
-  "paper": 0.35
+  "paper": 0.15
 };
 const MIN_AREA_RATIO_BY_LABEL = {
   person: 0.01,
@@ -141,7 +141,7 @@ const MIN_SHORT_SIDE_PX_BY_LABEL = {
 const ACCESSORY_SCORE_THRESHOLDS = {
   wire: 0.12,
   earphone: 0.35,
-  headphone: 0.90
+  headphone: 0.82
 };
 let wasmReady = false;
 let ProctorEngineCtor = null;
@@ -870,7 +870,7 @@ class ProctorCore {
       1
     );
     const headphoneScoreHeuristic = this.clamp(
-      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 1.05 + headBand.dark_ratio * 0.65 + (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.45,
+      Math.min(leftEarPad.dark_ratio, rightEarPad.dark_ratio) * 0.50 + headBand.dark_ratio * 0.30 + (leftEarPad.edge_ratio + rightEarPad.edge_ratio) * 0.85,
       0,
       1
     );

@@ -36,33 +36,33 @@ class WarningSystem:
         self.termination_timer = {}  # student_id -> Timer handle
 
         # Global minimum gap between any two warnings (seconds)
-        self.global_gap_seconds = 1.5
+        self.global_gap_seconds = 3.0
         # Per-type gaps — critical items fire faster; minor distractions fire slower
         self.type_gap_seconds = {
             # Immediate threats — fire quickly but not spam
-            'PROHIBITED_OBJECT':    2.0,
+            'PROHIBITED_OBJECT':    3.0,
             'MULTIPLE_FACES':       3.0,
-            'TAB_SWITCH':           2.0,
-            'PROHIBITED_SHORTCUT':  2.0,
+            'TAB_SWITCH':           3.0,
+            'PROHIBITED_SHORTCUT':  3.0,
             'VOICE_DETECTED':       6.0,   # audio: only after 8s continuous
             'IDENTITY_MISMATCH':    4.0,
             # Behavioural distractions — need longer persistence
-            'NO_FACE':              1.5,   # detect quickly
-            'DISTRACTION':          1.5,   # gaze/head away — needs repetition
-            'HEAD_MOVEMENT':        1.0,
+            'NO_FACE':              3.0,   # detect quickly
+            'DISTRACTION':          3.0,   # gaze/head away — needs repetition
+            'HEAD_MOVEMENT':        3.0,
             'HEAD_DOWN':            3.0,
             'HEAD_UP':              3.0,
 
             'STUDENT_LEFT_SEAT':    4.0,
             'EYES_CLOSED':          6.0,
-            'GAZE_LEFT':            1.0,
-            'GAZE_RIGHT':           1.0,
-            'GAZE_UP':              1.0,
-            'GAZE_DOWN':            1.0,
-            'GAZE_UP_LEFT':         1.0,
-            'GAZE_UP_RIGHT':        1.0,
-            'GAZE_DOWN_LEFT':       1.0,
-            'GAZE_DOWN_RIGHT':      1.0,
+            'GAZE_LEFT':            3.0,
+            'GAZE_RIGHT':           3.0,
+            'GAZE_UP':              3.0,
+            'GAZE_DOWN':            3.0,
+            'GAZE_UP_LEFT':         3.0,
+            'GAZE_UP_RIGHT':        3.0,
+            'GAZE_DOWN_LEFT':       3.0,
+            'GAZE_DOWN_RIGHT':      3.0,
         }
         self.type_gap_seconds['TERMINATED_BY_ADMIN'] = 0.0
 
@@ -118,9 +118,9 @@ class WarningSystem:
             if self.warnings[sid] >= self.max_warnings:
                 return False
 
-            # Increment warning count. If auto-terminate is true, cap at max_warnings so it doesn't inflate.
+            # Increment warning count. If auto-terminate is true, cap at max_warnings + 1 so it doesn't inflate endlessly.
             if self.auto_terminate:
-                if self.warnings[sid] < self.max_warnings:
+                if self.warnings[sid] <= self.max_warnings:
                     self.warnings[sid] += 1
             else:
                 self.warnings[sid] += 1
@@ -167,7 +167,7 @@ class WarningSystem:
                     'source': 'server'
                 }, namespace='/student')
 
-        # If threshold reached, emit termination
+        # If threshold exceeded, emit termination
         if count >= self.max_warnings:
             if not self.auto_terminate:
                 # Let admin decide; notify them that student reached threshold
@@ -178,7 +178,7 @@ class WarningSystem:
                         'warnings': count
                     }, namespace='/admin')
                 return False
-            # Auto-terminate, but after a ~2s grace so 3rd warning shows
+            # Auto-terminate, but after a short grace so the UI can catch up
             def do_term():
                 reason = f"Reached {self.max_warnings} warnings for violations: {vtype}"
                 print(f"🚨 TERMINATING EXAM for student {student_id}: {reason}")
@@ -200,7 +200,7 @@ class WarningSystem:
             except Exception:
                 pass
             import threading
-            t = threading.Timer(2.0, do_term)
+            t = threading.Timer(15.0, do_term)
             self.termination_timer[sid] = t
             t.start()
             return True  # termination scheduled
@@ -218,6 +218,16 @@ class WarningSystem:
         sid = str(student_id)
         with self.lock:
             return list(self.violations.get(sid, []))
+
+    def acknowledge_warning(self, student_id):
+        """Set quiet period for the student after acknowledgment"""
+        sid = str(student_id)
+        with self.lock:
+            self.last_warning_at[sid] = time.time()
+            if sid in self.last_warning_type_at:
+                for vtype in self.last_warning_type_at[sid]:
+                    self.last_warning_type_at[sid][vtype] = time.time()
+        print(f"✓ Acknowledged warning for student {student_id}, global gap reset.")
 
     def reset_student(self, student_id):
         """Reset warnings for student"""

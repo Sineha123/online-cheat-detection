@@ -2574,8 +2574,8 @@
                 if (this.examTerminated || !examStarted) return;
                 if (this.warningModalOpen) {
                     const incomingCount = Number(violationData.total_warnings || 0);
-                    if (incomingCount >= MAX_WARNINGS) {
-                        // Force-show the final warning immediately.
+                    if (incomingCount >= MAX_WARNINGS || this.currentWarnings >= MAX_WARNINGS) {
+                        // Force-show the final warning immediately or terminate
                         this.pendingViolations = [];
                         this.warningModalOpen = false;
                         const overlay = document.getElementById('warning-overlay');
@@ -2602,9 +2602,8 @@
 
                 // Always respect the post-acknowledge quiet period, even for server-driven warnings.
                 const graceRemaining = this.acknowledgeGraceUntil - now;
-                if (graceRemaining > 0) {
-                    setTimeout(() => this.addWarning(violationData), graceRemaining);
-                    return;
+                if (graceRemaining > 0 || this.warningModalOpen) {
+                    return; // Ignore / discard new warnings during cooldown or while modal is open!
                 }
 
                 // Avoid rapid back-to-back warnings right after user acknowledges one.
@@ -2623,7 +2622,7 @@
                 if (!hasServerCount && (now - lastKeyAt) < this.duplicateKeyWindowMs) return;
 
                 if (typeof violationData.total_warnings === 'number') {
-                    const serverWarnings = Math.min(violationData.total_warnings, MAX_WARNINGS);
+                    const serverWarnings = Math.min(violationData.total_warnings, MAX_WARNINGS + 1);
                     const allowed = Math.min(serverWarnings, this.currentWarnings + 1);
                     if (allowed <= this.currentWarnings) return;
                     this.currentWarnings = allowed;
@@ -2632,7 +2631,7 @@
                     // Optimistic local increment but only +1
                     const allowed = this.currentWarnings + 1;
                     if (allowed <= this.currentWarnings) return;
-                    this.currentWarnings = Math.min(allowed, MAX_WARNINGS);
+                    this.currentWarnings = Math.min(allowed, MAX_WARNINGS + 1);
                 }
 
                 this.lastWarningAt = now;
@@ -2646,14 +2645,16 @@
                     student_name: studentName
                 });
 
-                this.showWarningPopup(violationData);
-                this.updateWarningBanner();
-                this.updateLiveWarningCount();
-                this.updateSecurityStatus();
-
                 if (this.currentWarnings >= MAX_WARNINGS && !this.terminationScheduled) {
                     this.scheduleTermination(`Maximum warnings (${MAX_WARNINGS}/${MAX_WARNINGS}) reached`);
                 }
+                if (this.currentWarnings <= MAX_WARNINGS) {
+                    this.showWarningPopup(violationData);
+                }
+                
+                this.updateWarningBanner();
+                this.updateLiveWarningCount();
+                this.updateSecurityStatus();
 
                 if (this.socket && studentId && violationData.source !== 'server') {
                     this.socket.emit('warning_issued', {
@@ -2704,15 +2705,21 @@
                 this.playAlertSound(warningLevel);
             },
 
-            closeWarning() {
+            async closeWarning() {
                 document.getElementById('warning-overlay').style.display = 'none';
                 this.warningModalOpen = false;
+                this.pendingViolations = []; // Clear pending queue completely!
                 this.acknowledgeGraceUntil = Date.now() + this.postAcknowledgeGraceMs;
                 window.focus();
-                // After grace, show next queued warning if any
-                if (this.pendingViolations.length > 0) {
-                    const next = this.pendingViolations.shift();
-                    setTimeout(() => this.addWarning(next), this.postAcknowledgeGraceMs);
+                
+                // Notify the server to trigger the 3-second quiet period and throttle dictionaries
+                try {
+                    await fetch('/api/acknowledge-warning', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                } catch (e) {
+                    console.log('Server warning acknowledgment failed:', e);
                 }
             },
 
@@ -2802,26 +2809,23 @@
                 const CENTER_YAW = 5;
                 const CENTER_PITCH = 7;
                 const HARD_YAW = 10;
-                const HARD_PITCH = 10;
+                const HARD_PITCH = 10; // Lowered to 10 for highly responsive eyes up detection
                 const HEAD_YAW = 6;
 
-                if (Math.abs(yaw) <= CENTER_YAW && Math.abs(pitch) <= CENTER_PITCH) {
+                if (Math.abs(yaw) <= CENTER_YAW && pitch <= CENTER_PITCH) {
                     return { code: 'CENTER', flag: null, label: 'Center' };
                 }
 
                 const left = yaw <= -HARD_YAW || headYaw <= -HEAD_YAW;
                 const right = yaw >= HARD_YAW || headYaw >= HEAD_YAW;
                 const up = pitch >= HARD_PITCH;
-                const down = pitch <= -HARD_PITCH;
+                // Ignore down eyes entirely
 
                 if (left && up) return { code: 'UP_LEFT', flag: 'GAZE_UP_LEFT', label: 'Up-left' };
                 if (right && up) return { code: 'UP_RIGHT', flag: 'GAZE_UP_RIGHT', label: 'Up-right' };
-                if (left && down) return { code: 'DOWN_LEFT', flag: 'GAZE_DOWN_LEFT', label: 'Down-left' };
-                if (right && down) return { code: 'DOWN_RIGHT', flag: 'GAZE_DOWN_RIGHT', label: 'Down-right' };
                 if (left) return { code: 'HARD_LEFT', flag: 'GAZE_LEFT', label: 'Hard left' };
                 if (right) return { code: 'HARD_RIGHT', flag: 'GAZE_RIGHT', label: 'Hard right' };
                 if (up) return { code: 'UP', flag: 'GAZE_UP', label: 'Looking up' };
-                if (down) return { code: 'DOWN', flag: 'GAZE_DOWN', label: 'Looking down' };
 
                 return { code: 'CENTER', flag: null, label: 'Center' };
             },
@@ -3307,7 +3311,18 @@
                     const bannerEl = document.getElementById('proctor-warning-banner');
                     const bannerTextEl = document.getElementById('warning-banner-text');
                     if (bannerEl && bannerTextEl) {
-                        const flagsArr = a.active_flags ? Array.from(a.active_flags) : [];
+                        let flagsArr = a.active_flags ? Array.from(a.active_flags) : [];
+                        // Filter out raw/noisy WASM flags to ensure only our debounced/robust rules trigger warnings
+                        const excludedFlags = new Set([
+                            'multiple_faces', 'MULTIPLE_FACES',
+                            'no_face', 'NO_FACE',
+                            'face_obscured', 'FACE_OBSCURED',
+                            'GAZE_LEFT', 'GAZE_RIGHT', 'GAZE_UP', 'GAZE_DOWN',
+                            'GAZE_UP_LEFT', 'GAZE_UP_RIGHT', 'GAZE_DOWN_LEFT', 'GAZE_DOWN_RIGHT',
+                            'gaze_left', 'gaze_right', 'gaze_up', 'gaze_down',
+                            'gaze_up_left', 'gaze_up_right', 'gaze_down_left', 'gaze_down_right'
+                        ]);
+                        flagsArr = flagsArr.filter(f => !excludedFlags.has(f));
                         // Book/notebook/paper/copy/register/journal all mapped to same category
                         const BOOK_LABELS = new Set(['book','book_heuristic','notebook','textbook','copy','paper','register','journal','notepad','notes','binder','folder','document','magazine']);
                         const allowedBanned = [
@@ -3330,6 +3345,7 @@
                         const gazeDir = hasFace ? warningSystem.classifyGazeDirection(m.gaze_yaw_deg, m.gaze_pitch_deg, m.yaw_deg) : null;
                         const nowTs = Date.now();
                         if (hasFace && gazeDir && gazeDir.code !== 'CENTER') {
+                            warningSystem.lastGazeActiveAt = nowTs;
                             if (warningSystem.gazeDirection !== gazeDir.code) {
                                 warningSystem.gazeDirection = gazeDir.code;
                                 warningSystem.gazeDirectionSince = nowTs;
@@ -3338,14 +3354,21 @@
                                 warningSystem.gazeDirectionFrames += 1;
                             }
                             const heldMs = nowTs - (warningSystem.gazeDirectionSince || nowTs);
-                            // ~0.8s persistence and at least 2 frames for faster left/right detection
-                            if (heldMs >= 800 && warningSystem.gazeDirectionFrames >= 2 && gazeDir.flag) {
+                            // ~0.8s persistence for left/right, 1.2s for UP
+                            let thresholdMs = 800;
+                            if (gazeDir.code.includes('UP')) {
+                                thresholdMs = 1200;
+                            }
+                            if (heldMs >= thresholdMs && warningSystem.gazeDirectionFrames >= 2 && gazeDir.flag) {
                                 if (!flagsArr.includes(gazeDir.flag)) flagsArr.push(gazeDir.flag);
                             }
                         } else {
-                            warningSystem.gazeDirection = null;
-                            warningSystem.gazeDirectionSince = 0;
-                            warningSystem.gazeDirectionFrames = 0;
+                            const lastActive = warningSystem.lastGazeActiveAt || 0;
+                            if (nowTs - lastActive > 800) {
+                                warningSystem.gazeDirection = null;
+                                warningSystem.gazeDirectionSince = 0;
+                                warningSystem.gazeDirectionFrames = 0;
+                            }
                         }
 
                         // ── Head pose direction (left/right/down) ──
@@ -3407,8 +3430,9 @@
                             if (!flagsArr.includes('NO_FACE')) flagsArr.push('NO_FACE');
                         }
 
-                        // ── Multiple Faces ──
-                        if (m.face_count > 1) {
+                        // Require at least 2 people detected by YOLO (person_count > 1) to completely eliminate background face false positives.
+                        const isMultiPerson = m.face_count > 1 && m.person_count > 1;
+                        if (isMultiPerson) {
                             if (warningSystem.multipleFaceSince) {
                                 warningSystem.multipleFaceFrames = (warningSystem.multipleFaceFrames || 0) + 1;
                             } else {
@@ -3416,7 +3440,7 @@
                                 warningSystem.multipleFaceFrames = 1;
                             }
                             const heldMultiMs = nowTs - (warningSystem.multipleFaceSince || nowTs);
-                            if (heldMultiMs >= 1200 && warningSystem.multipleFaceFrames >= 2) {
+                            if (heldMultiMs >= 2000 && warningSystem.multipleFaceFrames >= 6) {
                                 flagsArr.push('MULTIPLE_FACES');
                             }
                         } else {
@@ -4357,17 +4381,7 @@
                         statusTxt.style.color = "#ef4444";
                     }
                     
-                    // Trigger a warning if suspicion score is consistently high!
-                    // E.g. Missing face, Multiple faces detected, Phone detected, Looking away...
-                    if (score > 80 && telemetry.faceCount === 0) {
-                        warningSystem.addWarning({ type: 'FACE_MISSING', details: 'No face detected in camera viewport', severity: 'high', student_id: studentId });
-                    }
-                    if (telemetry.faceCount > 1) {
-                         warningSystem.addWarning({ type: 'MULTIPLE_FACES', details: `Detected ${telemetry.faceCount} faces!`, severity: 'high', student_id: studentId });
-                    }
-                    if (telemetry.phoneDetected) {
-                         warningSystem.addWarning({ type: 'DEVICE_DETECTED', details: 'Prohibited electronic device detected', severity: 'high', student_id: studentId });
-                    }
+                    // Local suspicion indicators updated successfully.
                 }
             });
         });

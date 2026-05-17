@@ -842,7 +842,13 @@
         socket.on('server_object_detected', function (data) {
             const key = String(data.student_id);
             if (!studentsData[key]) return;
-            const label = String(data.label || '').toLowerCase();
+            let label = String(data.label || '').toLowerCase();
+            if (label.includes('book') || label.includes('notebook')) label = 'book';
+            else if (label.includes('paper')) label = 'paper';
+            else if (label.includes('phone') || label.includes('mobile')) label = 'cell phone';
+            else if (label.includes('smartwatch') || label.includes('clock')) label = 'smartwatch';
+            else if (label.includes('headphone')) label = 'headphone';
+            else if (label.includes('earphone')) label = 'earphone';
             if (!label) return;
             const arr = studentsData[key].banned_labels = studentsData[key].banned_labels || [];
             if (!arr.includes(label)) arr.push(label);
@@ -898,8 +904,10 @@
             studentsData[sid].verdict = data.analysis?.verdict || 'GOOD_TO_GO';
             studentsData[sid].integrity_verified = Boolean(data.engine?.integrity_verified);
             studentsData[sid].last_telemetry_ms = Number(data.timestamp_ms || Date.now());
-            // Store object detection data for card display
-            studentsData[sid].banned_labels = Array.isArray(data.metrics?.banned_labels) ? data.metrics.banned_labels : [];
+            // Store object detection data for card display: merge incoming labels with existing ones to avoid overwriting server contour alerts
+            const existingBanned = Array.isArray(studentsData[sid].banned_labels) ? studentsData[sid].banned_labels : [];
+            const incomingBanned = Array.isArray(data.metrics?.banned_labels) ? data.metrics.banned_labels : [];
+            studentsData[sid].banned_labels = Array.from(new Set([...existingBanned, ...incomingBanned]));
             studentsData[sid].active_flags = Array.isArray(data.analysis?.active_flags) ? data.analysis.active_flags : [];
             studentsData[sid].face_count = data.metrics?.face_count ?? null;
             studentsData[sid].person_count = data.metrics?.person_count ?? null;
@@ -1139,6 +1147,7 @@
                 student_name: data.student_name || existing.student_name || `Student ${sid}`,
                 warnings: 0,
                 violations: [],
+                banned_labels: [], // Clear server-side contour alerts on new exam start!
                 startTime: startTime,
                 endTime: null,
                 lastUpdate: Date.now()
@@ -1190,7 +1199,13 @@
                 }
                 const vtype = String(data.violation.type || '').toUpperCase();
                 if (vtype === 'PROHIBITED_OBJECT') {
-                    const label = String(data.violation.details || data.details || '').toLowerCase();
+                    let label = String(data.violation.details || data.details || '').toLowerCase();
+                    if (label.includes('book') || label.includes('notebook')) label = 'book';
+                    else if (label.includes('paper')) label = 'paper';
+                    else if (label.includes('phone') || label.includes('mobile')) label = 'cell phone';
+                    else if (label.includes('smartwatch') || label.includes('clock')) label = 'smartwatch';
+                    else if (label.includes('headphone')) label = 'headphone';
+                    else if (label.includes('earphone')) label = 'earphone';
                     const arr = studentsData[key].banned_labels = studentsData[key].banned_labels || [];
                     if (label && !arr.includes(label)) arr.push(label);
                 }
@@ -1203,6 +1218,16 @@
 
             const violationType = data.violation?.type || 'Unknown violation';
             showAlert(`⚠️ ${data.student_name}: ${violationType} (Warning ${data.total_warnings}/3)`);
+
+            // Define socket handler for clearing warnings
+            socket.on('warnings_cleared', function (cData) {
+                const cSid = String(cData.student_id || '');
+                if (!cSid || !studentsData[cSid]) return;
+                studentsData[cSid].warnings = 0;
+                studentsData[cSid].violations = [];
+                studentsData[cSid].banned_labels = [];
+                updateDashboard(true);
+            });
         });
 
         // Handle live video frames (socket relay from student)
@@ -1353,7 +1378,7 @@
                     violations > 0 ||
                     (Array.isArray(student.banned_labels) && student.banned_labels.length > 0) ||
                     student.face_count === 0 ||
-                    student.face_count > 1;
+                    (student.face_count > 1 && student.person_count > 1);
                 if (hasLiveViolation) activeViolations++;
             });
 
@@ -1450,6 +1475,7 @@
             students.forEach(student => {
                 const card = createStudentCard(student);
                 grid.appendChild(card);
+                refreshStudentTelemetryRow(student.student_id);
             });
         }
 
@@ -1606,8 +1632,11 @@
                 const flags = student.active_flags || [];
                 const parts = [];
                 // Prioritize banned objects in the secondary colored area
-                if (banned.length > 0) parts.push(`🚫 ${banned.join(', ')}`);
-                if (student.face_count > 1) parts.push(`👥 ${student.face_count} faces`);
+                if (banned.length > 0) {
+                    const formattedBanned = banned.map(l => l.charAt(0).toUpperCase() + l.slice(1));
+                    parts.push(`🚫 ${formattedBanned.join(', ')}`);
+                }
+                if (student.face_count > 1 && student.person_count > 1) parts.push(`👥 ${student.face_count} faces`);
                 if (student.face_count === 0) parts.push('⚠️ No face');
                 
                 objectsEl.innerHTML = parts.length > 0 ? parts.join(' │ ') : '';
@@ -1952,12 +1981,13 @@
             const banned = (Array.isArray(student.banned_labels) && student.banned_labels.length>0) ? student.banned_labels : (Array.isArray(student.metrics?.banned_labels) ? student.metrics.banned_labels : []);
             const flags = student.active_flags || [];
             const faces = student.face_count;
+            const persons = student.person_count;
 
             const issues = [];
             if (score > 70) issues.push(`High suspicion (${score})`);
             if (banned.length > 0) issues.push(`Banned objects: ${banned.join(', ')}`);
             if (faces === 0) issues.push('No face detected');
-            if (faces > 1) issues.push(`${faces} faces detected`);
+            if (faces > 1 && persons > 1) issues.push(`${faces} faces detected`);
             if (flags.includes('LOOKING_AWAY')) issues.push('Looking away');
             if (flags.includes('PHONE_DETECTED') || flags.includes('BOOK_DETECTED') || banned.length>0) issues.push('Prohibited object: ' + (banned.join(', ') || 'detected'));
 
